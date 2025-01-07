@@ -387,7 +387,7 @@ reentry:
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* ur = VM_UV(LUAU_INSN_B(insn));
-                TValue* v = ttisupval(ur) ? upvalue(ur)->v : ur;
+                TValue* v = ttisupval(ur) ? lupvalue(ur)->v : ur;
 
                 setobj2s(L, ra, v);
                 VM_NEXT();
@@ -398,7 +398,7 @@ reentry:
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* ur = VM_UV(LUAU_INSN_B(insn));
-                UpVal* uv = upvalue(ur);
+                UpVal* uv = lupvalue(ur);
 
                 setobj(L, uv->v, ra);
                 luaC_barrier(L, uv, ra);

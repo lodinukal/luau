@@ -341,7 +341,8 @@ static bool compileFile(const char* name, CompileFormat format, Luau::CodeGen::A
             bcb.setDumpFlags(Luau::BytecodeBuilder::Dump_Source | Luau::BytecodeBuilder::Dump_Remarks);
             bcb.setDumpSource(*source);
         }
-        else if (format == CompileFormat::Codegen || format == CompileFormat::CodegenAsm || format == CompileFormat::CodegenIr || format == CompileFormat::CodegenVerbose)
+        else if (format == CompileFormat::Codegen || format == CompileFormat::CodegenAsm || format == CompileFormat::CodegenIr ||
+                 format == CompileFormat::CodegenVerbose)
         {
             bcb.setDumpFlags(
                 Luau::BytecodeBuilder::Dump_Code | Luau::BytecodeBuilder::Dump_Source | Luau::BytecodeBuilder::Dump_Locals |
@@ -357,7 +358,7 @@ static bool compileFile(const char* name, CompileFormat format, Luau::CodeGen::A
         Luau::ParseResult result = Luau::Parser::parse(source->c_str(), source->size(), names, allocator);
 
         if (!result.errors.empty())
-            throw Luau::ParseErrors(result.errors);
+            LUAU_THROW(Luau::ParseErrors(result.errors));
 
         stats.lines += result.lines;
         stats.parseTime += recordDeltaTime(currts);

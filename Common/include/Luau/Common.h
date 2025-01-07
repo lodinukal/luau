@@ -148,3 +148,23 @@ FValue<T>* FValue<T>::list = nullptr;
 #else
 #define LUAU_PRINTF_ATTR(fmt, arg)
 #endif
+
+#ifndef LUAU_EXTERNAL_TRY_CATCH
+#define LUAU_TRY_CATCH(trying, catching) \
+    try \
+    { \
+        trying(); \
+    } \
+    catch (const std::exception& e) \
+    { \
+        catching(e); \
+    }
+#define LUAU_THROW(e) throw e
+#else
+#if not defined(LUAU_TRY_CATCH)
+#define LUAU_TRY_CATCH(trying, catching) trying();
+#error "LUAU_TRY_CATCH(trying, catching) must be defined when exceptions are disabled"
+#define LUAU_THROW(e) LUAU_UNREACHABLE()
+#error "LUAU_THROW(e) must be defined when exceptions are disabled
+#endif
+#endif

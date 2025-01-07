@@ -477,7 +477,7 @@ init: // using goto's to optimize tail recursion
                 {
                     p += 4;
                     goto init; // return match(ms, s, p + 4);
-                }              // else fail (s == NULL)
+                } // else fail (s == NULL)
                 break;
             }
             case 'f':
@@ -555,7 +555,7 @@ init: // using goto's to optimize tail recursion
                 case '+':             // 1 or more repetitions
                     s++;              // 1 match already done
                     LUAU_FALLTHROUGH; // go through
-                case '*': // 0 or more repetitions
+                case '*':             // 0 or more repetitions
                     s = max_expand(ms, s, p, ep);
                     break;
                 case '-': // 0 or more repetitions (minimum)
@@ -1654,7 +1654,7 @@ static const luaL_Reg strlib[] = {
     {NULL, NULL},
 };
 
-static void createmetatable(lua_State* L)
+static void createmetatable_strlib(lua_State* L)
 {
     lua_createtable(L, 0, 1); // create metatable for strings
     lua_pushliteral(L, "");   // dummy string
@@ -1672,7 +1672,7 @@ static void createmetatable(lua_State* L)
 int luaopen_string(lua_State* L)
 {
     luaL_register(L, LUA_STRLIBNAME, strlib);
-    createmetatable(L);
+    createmetatable_strlib(L);
 
     return 1;
 }

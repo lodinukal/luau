@@ -69,7 +69,7 @@ LUAU_NOINLINE void CompileError::raise(const Location& location, const char* for
     std::string message = vformat(format, args);
     va_end(args);
 
-    throw CompileError(location, message);
+    LUAU_THROW(CompileError(location, message));
 }
 
 static BytecodeBuilder::StringRef sref(AstName name)
@@ -1624,7 +1624,8 @@ struct Compiler
                         return;
                     }
                 }
-                else if (FFlag::LuauCompileOptimizeRevArith && options.optimizationLevel >= 2 && (expr->op == AstExprBinary::Add || expr->op == AstExprBinary::Mul))
+                else if (FFlag::LuauCompileOptimizeRevArith && options.optimizationLevel >= 2 &&
+                         (expr->op == AstExprBinary::Add || expr->op == AstExprBinary::Mul))
                 {
                     // Optimization: replace k*r with r*k when r is known to be a number (otherwise metamethods may be called)
                     if (LuauBytecodeType* ty = exprTypes.find(expr); ty && *ty == LBC_TYPE_NUMBER)
@@ -4330,7 +4331,7 @@ void compileOrThrow(BytecodeBuilder& bytecode, const std::string& source, const 
     ParseResult result = Parser::parse(source.c_str(), source.size(), names, allocator, parseOptions);
 
     if (!result.errors.empty())
-        throw ParseErrors(result.errors);
+        LUAU_THROW(ParseErrors(result.errors));
 
     compileOrThrow(bytecode, result, names, options);
 }
@@ -4352,18 +4353,28 @@ std::string compile(const std::string& source, const CompileOptions& options, co
         return BytecodeBuilder::getError(error);
     }
 
-    try
+    std::string r;
+    const auto b = [&]()
     {
         BytecodeBuilder bcb(encoder);
         compileOrThrow(bcb, result, names, options);
 
-        return bcb.getBytecode();
-    }
-    catch (CompileError& e)
+        r = bcb.getBytecode();
+    };
+    const auto c = [&](const std::exception& e)
     {
-        std::string error = format(":%d: %s", e.getLocation().begin.line + 1, e.what());
-        return BytecodeBuilder::getError(error);
-    }
+        if (const CompileError* cerr = dynamic_cast<const CompileError*>(&e))
+        {
+            std::string error = format(":%d: %s", cerr->getLocation().begin.line + 1, cerr->what());
+            r = BytecodeBuilder::getError(error);
+        }
+        else
+        {
+            LUAU_THROW(e);
+        }
+    };
+    LUAU_TRY_CATCH(b, c);
+    return r;
 }
 
 void setCompileConstantNil(CompileConstant* constant)

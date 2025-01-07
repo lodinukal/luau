@@ -123,43 +123,61 @@ int luaD_rawrunprotected(lua_State* L, Pfunc f, void* ud)
 {
     int status = 0;
 
-    try
+
+    const auto b = [&]()
     {
         f(L, ud);
-        return 0;
-    }
-    catch (lua_exception& e)
+    };
+    const auto c = [&](const std::exception& e)
     {
-        // It is assumed/required that the exception caught here was thrown from the same Luau state.
-        // If this assert fires, it indicates a lua_exception was not properly caught and propagated
-        // to the exception handler for a different Luau state. Report this issue to the Luau team if
-        // you need more information or assistance resolving this assert.
-        LUAU_ASSERT(e.getThread() == L);
-
-        status = e.getStatus();
-    }
-    catch (std::exception& e)
-    {
-        // Luau will never throw this, but this can catch exceptions that escape from C++ implementations of external functions
-        try
+        if (const lua_exception* le = dynamic_cast<const lua_exception*>(&e))
         {
-            // there's no exception object on stack; let's push the error on stack so that error handling below can proceed
-            luaG_pusherror(L, e.what());
-            status = LUA_ERRRUN;
+            LUAU_ASSERT(le->getThread() == L);
+            status = le->getStatus();
         }
-        catch (std::exception&)
-        {
-            // out of memory while allocating error string
+        else
             status = LUA_ERRMEM;
-        }
-    }
+    };
+
+    LUAU_TRY_CATCH(b, c);
+
+    // try
+    // {
+    //     f(L, ud);
+    //     return 0;
+    // }
+    // catch (lua_exception& e)
+    // {
+    //     // It is assumed/required that the exception caught here was thrown from the same Luau state.
+    //     // If this assert fires, it indicates a lua_exception was not properly caught and propagated
+    //     // to the exception handler for a different Luau state. Report this issue to the Luau team if
+    //     // you need more information or assistance resolving this assert.
+    //     LUAU_ASSERT(e.getThread() == L);
+
+    //     status = e.getStatus();
+    // }
+    // catch (std::exception& e)
+    // {
+    //     // Luau will never throw this, but this can catch exceptions that escape from C++ implementations of external functions
+    //     try
+    //     {
+    //         // there's no exception object on stack; let's push the error on stack so that error handling below can proceed
+    //         luaG_pusherror(L, e.what());
+    //         status = LUA_ERRRUN;
+    //     }
+    //     catch (std::exception&)
+    //     {
+    //         // out of memory while allocating error string
+    //         status = LUA_ERRMEM;
+    //     }
+    // }
 
     return status;
 }
 
 l_noret luaD_throw(lua_State* L, int errcode)
 {
-    throw lua_exception(L, errcode);
+    LUAU_THROW(lua_exception(L, errcode));
 }
 #endif
 

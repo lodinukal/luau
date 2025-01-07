@@ -421,18 +421,19 @@ FragmentTypeCheckResult typecheckFragment_(
         limits
     };
 
-    try
+    const auto b = [&]()
     {
         cs.run();
-    }
-    catch (const TimeLimitError&)
+    };
+    const auto c = [&](const std::exception& e)
     {
-        stale->timeout = true;
-    }
-    catch (const UserCancelError&)
-    {
-        stale->cancelled = true;
-    }
+        if (const TimeLimitError* tle = dynamic_cast<const TimeLimitError*>(&e))
+            stale->timeout = true;
+        else if (const UserCancelError* uce = dynamic_cast<const UserCancelError*>(&e))
+            stale->cancelled = true;
+    };
+
+    LUAU_TRY_CATCH(b, c);
 
     // In frontend we would forbid internal types
     // because this is just for autocomplete, we don't actually care

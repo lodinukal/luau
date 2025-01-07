@@ -64,7 +64,7 @@ LUAU_NOINLINE void ParseError::raise(const Location& location, const char* forma
     std::string message = vformat(format, args);
     va_end(args);
 
-    throw ParseError(location, message);
+    LUAU_THROW(ParseError(location, message));
 }
 
 ParseErrors::ParseErrors(std::vector<ParseError> errors)
@@ -160,20 +160,25 @@ ParseResult Parser::parse(const char* buffer, size_t bufferSize, AstNameTable& n
 
     Parser p(buffer, bufferSize, names, allocator, options);
 
-    try
+    ParseResult result;
+    const auto b = [&]()
     {
         AstStatBlock* root = p.parseChunk();
         size_t lines = p.lexer.current().location.end.line + (bufferSize > 0 && buffer[bufferSize - 1] != '\n');
-
-        return ParseResult{root, lines, std::move(p.hotcomments), std::move(p.parseErrors), std::move(p.commentLocations)};
-    }
-    catch (ParseError& err)
+        result = ParseResult{root, lines, std::move(p.hotcomments), std::move(p.parseErrors), std::move(p.commentLocations)};
+    };
+    const auto c = [&](const std::exception& e)
     {
-        // when catching a fatal error, append it to the list of non-fatal errors and return
-        p.parseErrors.push_back(err);
-
-        return ParseResult{nullptr, 0, {}, p.parseErrors};
-    }
+        if (const ParseError* perr = dynamic_cast<const ParseError*>(&e))
+        {
+            p.parseErrors.push_back(*perr);
+            result = ParseResult{nullptr, 0, {}, p.parseErrors};
+        }
+        else
+            LUAU_THROW(e);
+    };
+    LUAU_TRY_CATCH(b, c);
+    return result;
 }
 
 Parser::Parser(const char* buffer, size_t bufferSize, AstNameTable& names, Allocator& allocator, const ParseOptions& options)
@@ -2239,7 +2244,8 @@ std::optional<AstExprBinary::Op> Parser::checkBinaryConfusables(const BinaryOpPr
         report(Location(start, next.location), "Unexpected '||'; did you mean 'or'?");
         return AstExprBinary::Or;
     }
-    else if (curr.type == '!' && next.type == '=' && curr.location.end == next.location.begin && binaryPriority[AstExprBinary::CompareNe].left > limit)
+    else if (curr.type == '!' && next.type == '=' && curr.location.end == next.location.begin &&
+             binaryPriority[AstExprBinary::CompareNe].left > limit)
     {
         nextLexeme();
         report(Location(start, next.location), "Unexpected '!='; did you mean '~='?");
@@ -2587,7 +2593,8 @@ AstExpr* Parser::parseSimpleExpr()
     {
         return parseNumber();
     }
-    else if (lexer.current().type == Lexeme::RawString || lexer.current().type == Lexeme::QuotedString || lexer.current().type == Lexeme::InterpStringSimple)
+    else if (lexer.current().type == Lexeme::RawString || lexer.current().type == Lexeme::QuotedString ||
+             lexer.current().type == Lexeme::InterpStringSimple)
     {
         return parseString();
     }
@@ -3500,7 +3507,7 @@ void Parser::report(const Location& location, const char* format, va_list args)
 
     // when limited to a single error, behave as if the error recovery is disabled
     if (FInt::LuauParseErrorLimit == 1)
-        throw ParseError(location, message);
+        LUAU_THROW(ParseError(location, message));
 
     parseErrors.emplace_back(location, message);
 

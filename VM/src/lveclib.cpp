@@ -302,7 +302,7 @@ static const luaL_Reg vectorlib[] = {
     {NULL, NULL},
 };
 
-static void createmetatable(lua_State* L)
+static void createmetatable_veclib(lua_State* L)
 {
     LUAU_ASSERT(FFlag::LuauVectorMetatable);
 
@@ -343,7 +343,7 @@ int luaopen_vector(lua_State* L)
 #endif
 
     if (FFlag::LuauVectorMetatable)
-        createmetatable(L);
+        createmetatable_veclib(L);
 
     return 1;
 }

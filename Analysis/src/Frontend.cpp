@@ -547,14 +547,15 @@ std::vector<ModuleName> Frontend::checkQueuedModules(
     {
         BuildQueueItem& item = buildQueueItems[i];
 
-        try
+        const auto b = [&]()
         {
             checkBuildQueueItem(item);
-        }
-        catch (...)
+        };
+        const auto c = [&](const std::exception& e)
         {
             item.exception = std::current_exception();
-        }
+        };
+        LUAU_TRY_CATCH(b, c);
 
         {
             std::unique_lock guard(mtx);
@@ -1385,18 +1386,20 @@ ModulePtr check(
     if (options.randomizeConstraintResolutionSeed)
         cs.randomize(*options.randomizeConstraintResolutionSeed);
 
-    try
+    const auto b = [&]()
     {
         cs.run();
-    }
-    catch (const TimeLimitError&)
+    };
+    const auto c = [&](const std::exception& e)
     {
-        result->timeout = true;
-    }
-    catch (const UserCancelError&)
-    {
-        result->cancelled = true;
-    }
+        if (const TimeLimitError* tle = dynamic_cast<const TimeLimitError*>(&e))
+            result->timeout = true;
+        else if (const UserCancelError* uce = dynamic_cast<const UserCancelError*>(&e))
+            result->cancelled = true;
+        else
+            throw e;
+    };
+    LUAU_TRY_CATCH(b, c);
 
     if (recordJsonLog)
     {
@@ -1529,9 +1532,10 @@ ModulePtr Frontend::check(
                 prepareModuleScope(name, scope, forAutocomplete);
         };
 
-        try
+        Luau::ModulePtr result = nullptr;
+        const auto b = [&]()
         {
-            return Luau::check(
+            result = Luau::check(
                 sourceModule,
                 mode,
                 requireCycles,
@@ -1546,13 +1550,22 @@ ModulePtr Frontend::check(
                 recordJsonLog,
                 writeJsonLog
             );
-        }
-        catch (const InternalCompilerError& err)
+        };
+        const auto c = [&](const std::exception& e)
         {
-            InternalCompilerError augmented = err.location.has_value() ? InternalCompilerError{err.message, sourceModule.name, *err.location}
-                                                                       : InternalCompilerError{err.message, sourceModule.name};
-            throw augmented;
-        }
+            if (const InternalCompilerError* ice = dynamic_cast<const InternalCompilerError*>(&e))
+            {
+                InternalCompilerError augmented = ice->location.has_value() ? InternalCompilerError{ice->message, sourceModule.name, *ice->location}
+                                                                            : InternalCompilerError{ice->message, sourceModule.name};
+                throw augmented;
+            }
+            else
+            {
+                throw e;
+            }
+        };
+        LUAU_TRY_CATCH(b, c);
+        return result;
     }
     else
     {
