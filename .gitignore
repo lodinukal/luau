@@ -19,3 +19,6 @@ __pycache__
 .cache
 .clangd
 .idea
+
+.zig-cache
+zig-out

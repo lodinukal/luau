@@ -1,0 +1,21 @@
+.{
+    .name = "luau",
+    .version = "0.661.0",
+    .dependencies = .{},
+    .paths = .{
+        "Analysis",
+        "Ast",
+        "CodeGen",
+        "Common",
+        "Compiler",
+        "Config",
+        "extern",
+        "fuzz",
+        "VM",
+
+        "src",
+        "license",
+        "build.zig",
+        "build.zig.zon",
+    },
+}

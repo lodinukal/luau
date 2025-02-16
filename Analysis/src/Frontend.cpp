@@ -13,6 +13,7 @@
 #include "Luau/EqSatSimplification.h"
 #include "Luau/FileResolver.h"
 #include "Luau/NonStrictTypeChecker.h"
+#include "Luau/NotNull.h"
 #include "Luau/Parser.h"
 #include "Luau/Scope.h"
 #include "Luau/StringUtils.h"
@@ -38,7 +39,6 @@ LUAU_FASTINT(LuauTypeInferRecursionLimit)
 LUAU_FASTINT(LuauTarjanChildLimit)
 LUAU_FASTFLAG(LuauInferInNoCheckMode)
 LUAU_FASTFLAGVARIABLE(LuauKnowsTheDataModel3)
-LUAU_FASTFLAGVARIABLE(LuauStoreCommentsForDefinitionFiles)
 LUAU_FASTFLAG(LuauSolverV2)
 LUAU_FASTFLAGVARIABLE(DebugLuauLogSolverToJson)
 LUAU_FASTFLAGVARIABLE(DebugLuauLogSolverToJsonFile)
@@ -47,10 +47,13 @@ LUAU_FASTFLAGVARIABLE(DebugLuauForceStrictMode)
 LUAU_FASTFLAGVARIABLE(DebugLuauForceNonStrictMode)
 LUAU_DYNAMIC_FASTFLAGVARIABLE(LuauRunCustomModuleChecks, false)
 
+LUAU_FASTFLAGVARIABLE(LuauBetterReverseDependencyTracking)
+
 LUAU_FASTFLAG(StudioReportLuauAny2)
 LUAU_FASTFLAGVARIABLE(LuauStoreSolverTypeOnModule)
 
 LUAU_FASTFLAGVARIABLE(LuauReferenceAllocatorInNewSolver)
+LUAU_FASTFLAGVARIABLE(LuauSelectivelyRetainDFGArena)
 
 namespace Luau
 {
@@ -137,7 +140,7 @@ static ParseResult parseSourceForModule(std::string_view source, Luau::SourceMod
     sourceModule.root = parseResult.root;
     sourceModule.mode = Mode::Definition;
 
-    if (FFlag::LuauStoreCommentsForDefinitionFiles && options.captureComments)
+    if (options.captureComments)
     {
         sourceModule.hotcomments = parseResult.hotcomments;
         sourceModule.commentLocations = parseResult.commentLocations;
@@ -820,6 +823,16 @@ bool Frontend::parseGraph(
             topseen = Permanent;
 
             buildQueue.push_back(top->name);
+
+            if (FFlag::LuauBetterReverseDependencyTracking)
+            {
+                // at this point we know all valid dependencies are processed into SourceNodes
+                for (const ModuleName& dep : top->requireSet)
+                {
+                    if (auto it = sourceNodes.find(dep); it != sourceNodes.end())
+                        it->second->dependents.insert(top->name);
+                }
+            }
         }
         else
         {
@@ -1049,6 +1062,11 @@ void Frontend::checkBuildQueueItem(BuildQueueItem& item)
         freeze(module->interfaceTypes);
 
         module->internalTypes.clear();
+        if (FFlag::LuauSelectivelyRetainDFGArena)
+        {
+            module->defArena.allocator.clear();
+            module->keyArena.allocator.clear();
+        }
 
         module->astTypes.clear();
         module->astTypePacks.clear();
@@ -1102,15 +1120,49 @@ void Frontend::recordItemResult(const BuildQueueItem& item)
     if (item.exception)
         std::rethrow_exception(item.exception);
 
-    if (item.options.forAutocomplete)
+    if (FFlag::LuauBetterReverseDependencyTracking)
     {
-        moduleResolverForAutocomplete.setModule(item.name, item.module);
-        item.sourceNode->dirtyModuleForAutocomplete = false;
+        bool replacedModule = false;
+        if (item.options.forAutocomplete)
+        {
+            replacedModule = moduleResolverForAutocomplete.setModule(item.name, item.module);
+            item.sourceNode->dirtyModuleForAutocomplete = false;
+        }
+        else
+        {
+            replacedModule = moduleResolver.setModule(item.name, item.module);
+            item.sourceNode->dirtyModule = false;
+        }
+
+        if (replacedModule)
+        {
+            LUAU_TIMETRACE_SCOPE("Frontend::invalidateDependentModules", "Frontend");
+            LUAU_TIMETRACE_ARGUMENT("name", item.name.c_str());
+            traverseDependents(
+                item.name,
+                [forAutocomplete = item.options.forAutocomplete](SourceNode& sourceNode)
+                {
+                    bool traverseSubtree = !sourceNode.hasInvalidModuleDependency(forAutocomplete);
+                    sourceNode.setInvalidModuleDependency(true, forAutocomplete);
+                    return traverseSubtree;
+                }
+            );
+        }
+
+        item.sourceNode->setInvalidModuleDependency(false, item.options.forAutocomplete);
     }
     else
     {
-        moduleResolver.setModule(item.name, item.module);
-        item.sourceNode->dirtyModule = false;
+        if (item.options.forAutocomplete)
+        {
+            moduleResolverForAutocomplete.setModule(item.name, item.module);
+            item.sourceNode->dirtyModuleForAutocomplete = false;
+        }
+        else
+        {
+            moduleResolver.setModule(item.name, item.module);
+            item.sourceNode->dirtyModule = false;
+        }
     }
 
     stats.timeCheck += item.stats.timeCheck;
@@ -1147,6 +1199,13 @@ ScopePtr Frontend::getModuleEnvironment(const SourceModule& module, const Config
     return result;
 }
 
+bool Frontend::allModuleDependenciesValid(const ModuleName& name, bool forAutocomplete) const
+{
+    LUAU_ASSERT(FFlag::LuauBetterReverseDependencyTracking);
+    auto it = sourceNodes.find(name);
+    return it != sourceNodes.end() && !it->second->hasInvalidModuleDependency(forAutocomplete);
+}
+
 bool Frontend::isDirty(const ModuleName& name, bool forAutocomplete) const
 {
     auto it = sourceNodes.find(name);
@@ -1161,15 +1220,79 @@ bool Frontend::isDirty(const ModuleName& name, bool forAutocomplete) const
  */
 void Frontend::markDirty(const ModuleName& name, std::vector<ModuleName>* markedDirty)
 {
+    LUAU_TIMETRACE_SCOPE("Frontend::markDirty", "Frontend");
+    LUAU_TIMETRACE_ARGUMENT("name", name.c_str());
+
+    if (FFlag::LuauBetterReverseDependencyTracking)
+    {
+        traverseDependents(
+            name,
+            [markedDirty](SourceNode& sourceNode)
+            {
+                if (markedDirty)
+                    markedDirty->push_back(sourceNode.name);
+
+                if (sourceNode.dirtySourceModule && sourceNode.dirtyModule && sourceNode.dirtyModuleForAutocomplete)
+                    return false;
+
+                sourceNode.dirtySourceModule = true;
+                sourceNode.dirtyModule = true;
+                sourceNode.dirtyModuleForAutocomplete = true;
+
+                return true;
+            }
+        );
+    }
+    else
+    {
+        if (sourceNodes.count(name) == 0)
+            return;
+
+        std::unordered_map<ModuleName, std::vector<ModuleName>> reverseDeps;
+        for (const auto& module : sourceNodes)
+        {
+            for (const auto& dep : module.second->requireSet)
+                reverseDeps[dep].push_back(module.first);
+        }
+
+        std::vector<ModuleName> queue{name};
+
+        while (!queue.empty())
+        {
+            ModuleName next = std::move(queue.back());
+            queue.pop_back();
+
+            LUAU_ASSERT(sourceNodes.count(next) > 0);
+            SourceNode& sourceNode = *sourceNodes[next];
+
+            if (markedDirty)
+                markedDirty->push_back(next);
+
+            if (sourceNode.dirtySourceModule && sourceNode.dirtyModule && sourceNode.dirtyModuleForAutocomplete)
+                continue;
+
+            sourceNode.dirtySourceModule = true;
+            sourceNode.dirtyModule = true;
+            sourceNode.dirtyModuleForAutocomplete = true;
+
+            if (0 == reverseDeps.count(next))
+                continue;
+
+            sourceModules.erase(next);
+
+            const std::vector<ModuleName>& dependents = reverseDeps[next];
+            queue.insert(queue.end(), dependents.begin(), dependents.end());
+        }
+    }
+}
+
+void Frontend::traverseDependents(const ModuleName& name, std::function<bool(SourceNode&)> processSubtree)
+{
+    LUAU_ASSERT(FFlag::LuauBetterReverseDependencyTracking);
+    LUAU_TIMETRACE_SCOPE("Frontend::traverseDependents", "Frontend");
+
     if (sourceNodes.count(name) == 0)
         return;
-
-    std::unordered_map<ModuleName, std::vector<ModuleName>> reverseDeps;
-    for (const auto& module : sourceNodes)
-    {
-        for (const auto& dep : module.second->requireSet)
-            reverseDeps[dep].push_back(module.first);
-    }
 
     std::vector<ModuleName> queue{name};
 
@@ -1181,22 +1304,10 @@ void Frontend::markDirty(const ModuleName& name, std::vector<ModuleName>* marked
         LUAU_ASSERT(sourceNodes.count(next) > 0);
         SourceNode& sourceNode = *sourceNodes[next];
 
-        if (markedDirty)
-            markedDirty->push_back(next);
-
-        if (sourceNode.dirtySourceModule && sourceNode.dirtyModule && sourceNode.dirtyModuleForAutocomplete)
+        if (!processSubtree(sourceNode))
             continue;
 
-        sourceNode.dirtySourceModule = true;
-        sourceNode.dirtyModule = true;
-        sourceNode.dirtyModuleForAutocomplete = true;
-
-        if (0 == reverseDeps.count(next))
-            continue;
-
-        sourceModules.erase(next);
-
-        const std::vector<ModuleName>& dependents = reverseDeps[next];
+        const Set<ModuleName>& dependents = sourceNode.dependents;
         queue.insert(queue.end(), dependents.begin(), dependents.end());
     }
 }
@@ -1339,7 +1450,7 @@ ModulePtr check(
         }
     }
 
-    DataFlowGraph dfg = DataFlowGraphBuilder::build(sourceModule.root, iceHandler);
+    DataFlowGraph dfg = DataFlowGraphBuilder::build(sourceModule.root, NotNull{&result->defArena}, NotNull{&result->keyArena}, iceHandler);
 
     UnifierSharedState unifierState{iceHandler};
     unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
@@ -1650,6 +1761,17 @@ std::pair<SourceNode*, SourceModule*> Frontend::getSourceNode(const ModuleName& 
 
     sourceNode->name = sourceModule->name;
     sourceNode->humanReadableName = sourceModule->humanReadableName;
+
+    if (FFlag::LuauBetterReverseDependencyTracking)
+    {
+        // clear all prior dependents. we will re-add them after parsing the rest of the graph 
+        for (const auto& [moduleName, _] : sourceNode->requireLocations)
+        {
+            if (auto depIt = sourceNodes.find(moduleName); depIt != sourceNodes.end())
+                depIt->second->dependents.erase(sourceNode->name);
+        }
+    }
+
     sourceNode->requireSet.clear();
     sourceNode->requireLocations.clear();
     sourceNode->dirtySourceModule = false;
@@ -1771,11 +1893,21 @@ std::string FrontendModuleResolver::getHumanReadableModuleName(const ModuleName&
     return frontend->fileResolver->getHumanReadableModuleName(moduleName);
 }
 
-void FrontendModuleResolver::setModule(const ModuleName& moduleName, ModulePtr module)
+bool FrontendModuleResolver::setModule(const ModuleName& moduleName, ModulePtr module)
 {
     std::scoped_lock lock(moduleMutex);
 
-    modules[moduleName] = std::move(module);
+    if (FFlag::LuauBetterReverseDependencyTracking)
+    {
+        bool replaced = modules.count(moduleName) > 0;
+        modules[moduleName] = std::move(module);
+        return replaced;
+    }
+    else
+    {
+        modules[moduleName] = std::move(module);
+        return false;
+    }
 }
 
 void FrontendModuleResolver::clearModules()
