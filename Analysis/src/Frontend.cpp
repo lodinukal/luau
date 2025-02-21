@@ -52,7 +52,6 @@ LUAU_FASTFLAGVARIABLE(LuauBetterReverseDependencyTracking)
 LUAU_FASTFLAG(StudioReportLuauAny2)
 LUAU_FASTFLAGVARIABLE(LuauStoreSolverTypeOnModule)
 
-LUAU_FASTFLAGVARIABLE(LuauReferenceAllocatorInNewSolver)
 LUAU_FASTFLAGVARIABLE(LuauSelectivelyRetainDFGArena)
 
 namespace Luau
@@ -1431,11 +1430,8 @@ ModulePtr check(
     result->mode = mode;
     result->internalTypes.owningModule = result.get();
     result->interfaceTypes.owningModule = result.get();
-    if (FFlag::LuauReferenceAllocatorInNewSolver)
-    {
-        result->allocator = sourceModule.allocator;
-        result->names = sourceModule.names;
-    }
+    result->allocator = sourceModule.allocator;
+    result->names = sourceModule.names;
 
     iceHandler->moduleName = sourceModule.name;
 
@@ -1764,7 +1760,7 @@ std::pair<SourceNode*, SourceModule*> Frontend::getSourceNode(const ModuleName& 
 
     if (FFlag::LuauBetterReverseDependencyTracking)
     {
-        // clear all prior dependents. we will re-add them after parsing the rest of the graph 
+        // clear all prior dependents. we will re-add them after parsing the rest of the graph
         for (const auto& [moduleName, _] : sourceNode->requireLocations)
         {
             if (auto depIt = sourceNodes.find(moduleName); depIt != sourceNodes.end())
