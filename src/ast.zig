@@ -78,19 +78,19 @@ test NameTable {
     defer table.deinit();
 }
 
-const zig_Position = extern struct {
+const Position = extern struct {
     line: c_uint,
     column: c_uint,
 };
 
-const zig_Location = extern struct {
-    begin: zig_Position,
-    end: zig_Position,
+const Location = extern struct {
+    begin: Position,
+    end: Position,
 };
 
 const zig_ParseResult_HotComment = extern struct {
     header: c_int,
-    location: zig_Location,
+    location: Location,
     content: [*]const u8,
     contentLen: usize,
 };
@@ -101,7 +101,7 @@ const zig_ParseResult_HotComments = extern struct {
 };
 
 const zig_ParseResult_Error = extern struct {
-    location: zig_Location,
+    location: Location,
     message: [*]const u8,
     message_len: usize,
 };
@@ -132,7 +132,7 @@ pub fn parse(source: []const u8, table: *NameTable, allocator: *Allocator) *Pars
 pub const ParseResult = opaque {
     pub const HotComment = struct {
         header: bool,
-        location: zig_Location,
+        location: Location,
         content: []const u8,
     };
 
@@ -148,7 +148,7 @@ pub const ParseResult = opaque {
     };
 
     pub const ParseError = struct {
-        location: zig_Location,
+        location: Location,
         message: []const u8,
     };
 
@@ -288,573 +288,933 @@ test ParseResult {
     }
 }
 
-pub const Node = opaque {
-    extern fn Luau_Ast_AstNode_get_class_index(self: *Node) callconv(.c) c_int;
-    extern fn Luau_Ast_AstNode_get_location(self: *Node) callconv(.c) zig_Location;
+pub const Name = extern struct {
+    value: [*:0]const u8,
+};
 
-    pub inline fn classIndex(self: *Node) c_int {
-        return Luau_Ast_AstNode_get_class_index(self);
-    }
+pub const Local = extern struct {
+    name: Name,
+    location: Location,
+    shadow: [*c]Local,
+    functionDepth: usize,
+    loopDepth: usize,
+    annotation: [*c]Type,
+};
 
-    pub inline fn kind(self: *Node) NodeKind {
-        return @enumFromInt(self.classIndex());
-    }
+// matches layout of optional for msvc and clang
+pub fn Optional(comptime T: type) type {
+    return extern struct {
+        value: T = undefined,
+        hasValue: bool,
 
-    pub inline fn location(self: *Node) zig_Location {
-        return Luau_Ast_AstNode_get_location(self);
-    }
+        pub fn to(self: @This()) ?T {
+            if (self.hasValue) {
+                return self.value;
+            } else {
+                return null;
+            }
+        }
+    };
+}
 
-    pub fn cast(base: *Node, comptime to: NodeKind) ?*to.Type() {
-        if (base.kind() == to) {
-            // return @alignCast(@fieldParentPtr("base", base));
+pub fn Array(comptime T: type) type {
+    return extern struct {
+        data: [*]T,
+        size: usize,
+
+        pub fn slice(self: @This()) []T {
+            return self.data[0..self.size];
+        }
+    };
+}
+
+pub const TypeList = extern struct {
+    types: Array([*c]Type),
+    /// Null indicates no tail, not an untyped tail.
+    tailType: [*c]Node = null,
+};
+
+pub const Node = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    pub const Kind = enum(u32) {
+        unknown,
+        attr,
+        generic_type,
+        generic_type_pack,
+        expr_group,
+        expr_constant_nil,
+        expr_constant_bool,
+        expr_constant_number,
+        expr_constant_string,
+        expr_local,
+        expr_global,
+        expr_varargs,
+        expr_call,
+        expr_index_name,
+        expr_index_expr,
+        expr_function,
+        expr_table,
+        expr_unary,
+        expr_binary,
+        expr_type_assertion,
+        expr_if_else,
+        expr_interp_string,
+        stat_block,
+        stat_if,
+        stat_while,
+        stat_repeat,
+        stat_break,
+        stat_continue,
+        stat_return,
+        stat_expr,
+        stat_local,
+        stat_for,
+        stat_for_in,
+        stat_assign,
+        stat_compound_assign,
+        stat_function,
+        stat_local_function,
+        stat_type_alias,
+        stat_type_function,
+        stat_declare_global,
+        stat_declare_function,
+        stat_declare_class,
+        type_reference,
+        type_table,
+        type_function,
+        type_typeof,
+        type_union,
+        type_intersection,
+        expr_error,
+        stat_error,
+        type_error,
+        type_singleton_bool,
+        type_singleton_string,
+        type_group,
+        type_pack_explicit,
+        type_pack_variadic,
+        type_pack_generic,
+
+        pub fn Type(self: Kind) type {
+            return switch (self) {
+                .unknown => Node,
+                .attr => Attr,
+                .generic_type => GenericType,
+                .generic_type_pack => GenericTypePack,
+                .expr_group => ExprGroup,
+                .expr_constant_nil => ExprConstantNil,
+                .expr_constant_bool => ExprConstantBool,
+                .expr_constant_number => ExprConstantNumber,
+                .expr_constant_string => ExprConstantString,
+                .expr_local => ExprLocal,
+                .expr_global => ExprGlobal,
+                .expr_varargs => ExprVarargs,
+                .expr_call => ExprCall,
+                .expr_index_name => ExprIndexName,
+                .expr_index_expr => ExprIndexExpr,
+                .expr_function => ExprFunction,
+                .expr_table => ExprTable,
+                .expr_unary => ExprUnary,
+                .expr_binary => ExprBinary,
+                .expr_type_assertion => ExprTypeAssertion,
+                .expr_if_else => ExprIfElse,
+                .expr_interp_string => ExprInterpString,
+                .stat_block => StatBlock,
+                .stat_if => StatIf,
+                .stat_while => StatWhile,
+                .stat_repeat => StatRepeat,
+                .stat_break => StatBreak,
+                .stat_continue => StatContinue,
+                .stat_return => StatReturn,
+                .stat_expr => StatExpr,
+                .stat_local => StatLocal,
+                .stat_for => StatFor,
+                .stat_for_in => StatForIn,
+                .stat_assign => StatAssign,
+                .stat_compound_assign => StatCompoundAssign,
+                .stat_function => StatFunction,
+                .stat_local_function => StatLocalFunction,
+                .stat_type_alias => StatTypeAlias,
+                .stat_type_function => StatTypeFunction,
+                .stat_declare_global => StatDeclareGlobal,
+                .stat_declare_function => StatDeclareFunction,
+                .stat_declare_class => StatDeclareClass,
+                .type_reference => TypeReference,
+                .type_table => TypeTable,
+                .type_function => TypeFunction,
+                .type_typeof => TypeTypeof,
+                .type_union => TypeUnion,
+                .type_intersection => TypeIntersection,
+                .expr_error => ExprError,
+                .stat_error => StatError,
+                .type_error => TypeError,
+                .type_singleton_bool => TypeSingletonBool,
+                .type_singleton_string => TypeSingletonString,
+                .type_group => TypeGroup,
+                .type_pack_explicit => TypePackExplicit,
+                .type_pack_variadic => TypePackVariadic,
+                .type_pack_generic => TypePackGeneric,
+            };
+        }
+    };
+
+    pub fn cast(base: *Node, comptime to: Kind) ?*to.Type() {
+        if (base.classIndex == to) {
+            // const InnerBase = @TypeOf(@field(@as(to.Type(), undefined), "base"));
+            // const first_parent: *InnerBase = @alignCast(@fieldParentPtr("base", base));
+            // return @alignCast(@fieldParentPtr("base", first_parent));
             return @ptrCast(base);
         }
         return null;
     }
 };
 
-/// AstName
-pub const zig_AstName = [*:0]const u8;
+pub const Attr = extern struct {
+    vtable: *const anyopaque,
 
-pub const NodeKind = enum(c_int) {
-    unknown,
-    attr,
-    generic_type,
-    generic_type_pack,
-    expr_group,
-    expr_constant_nil,
-    expr_constant_bool,
-    expr_constant_number,
-    expr_constant_string,
-    expr_local,
-    expr_global,
-    expr_varargs,
-    expr_call,
-    expr_index_name,
-    expr_index_expr,
-    expr_function,
-    expr_table,
-    expr_unary,
-    expr_binary,
-    //
-    expr_type_assertion,
-    expr_if_else,
-    expr_interp_string,
-    stat_block,
-    stat_if,
-    stat_while,
-    stat_repeat,
-    stat_break,
-    stat_continue,
-    stat_return,
-    stat_expr,
-    stat_local,
-    stat_for,
-    stat_for_in,
-    stat_assign,
-    stat_compound_assign,
-    stat_function,
-    stat_local_function,
-    stat_type_alias,
-    stat_type_function,
-    stat_declare_global,
-    stat_declare_function,
-    stat_declare_class,
-    type_reference,
-    type_table,
-    type_function,
-    type_typeof,
-    type_union,
-    type_intersection,
-    expr_error,
-    stat_error,
-    type_error,
-    type_singleton_bool,
-    type_singleton_string,
-    type_group,
-    type_pack_explicit,
-    type_pack_variadic,
-    type_pack_generic,
+    classIndex: Node.Kind,
+    location: Location,
 
-    pub fn Type(self: NodeKind) type {
-        return switch (self) {
-            .attr => Attr,
-            .generic_type => GenericType,
-            .generic_type_pack => GenericTypePack,
-            .expr_group => ExprGroup,
-            .expr_constant_nil => void,
-            .expr_constant_bool => ExprConstantBool,
-            .expr_constant_number => ExprConstantNumber,
-            .expr_constant_string => ExprConstantString,
-            .expr_local => ExprLocal,
-            .expr_global => ExprGlobal,
-            .expr_varargs => void,
-            .expr_call => ExprCall,
-            .expr_index_name => ExprIndexName,
-            .expr_index_expr => ExprIndexExpr,
-            .expr_function => ExprFunction,
-            .expr_table => ExprTable,
-            .expr_unary => ExprUnary,
-            .expr_binary => ExprBinary,
-            .stat_block => StatBlock,
-            .stat_local => StatLocal,
-            else => |kind| @compileError(@tagName(kind) ++ " not implemented"),
-        };
-    }
-};
+    kind: Type,
 
-const TestParseContext = struct {
-    allocator: *Allocator,
-    table: *NameTable,
-
-    pub fn init() TestParseContext {
-        const a = Allocator.init(&std.testing.allocator);
-        const table = NameTable.init(a);
-        return .{ .allocator = a, .table = table };
-    }
-
-    pub fn deinit(self: TestParseContext) void {
-        self.table.deinit();
-        self.allocator.deinit();
-    }
-
-    pub fn parseContent(self: TestParseContext, source: []const u8) *ParseResult {
-        return parse(source, self.table, self.allocator);
-    }
-};
-
-pub const Attr = opaque {
-    pub const Type = enum {
-        checked,
-        native,
+    pub const Kind = enum(c_int) {
+        checked = 0,
+        native = 1,
     };
-
-    extern fn Luau_Ast_Attr_get_type(*Attr) callconv(.c) c_int;
-
-    pub inline fn getType(self: *Attr) Type {
-        return @enumFromInt(Luau_Ast_Attr_get_type(self));
-    }
 };
 
-test Attr {
-    //     var context = TestParseContext.init();
-    //     defer context.deinit();
+pub const GenericType = extern struct {
+    vtable: *const anyopaque,
 
-    //     const source =
-    //         \\@checked
-    //         \\local x = 1
-    //         \\
-    //     ;
-    //     const parsed = context.parseContent(source);
-    //     defer parsed.deinit();
+    classIndex: Node.Kind,
+    location: Location,
 
-    //     const root = parsed.getRoot();
-    //     const kind = root.kind();
-    //     try std.testing.expectEqual(NodeKind.attr, kind);
-    //     const as_attr = root.cast(.attr);
-    //     try std.testing.expect(as_attr != null);
-    //     try std.testing.expectEqual(Attr.Type.checked, as_attr.?.getType());
-}
-
-pub const TypeList = extern struct {
-    types: [*]const *Node,
-    types_len: usize,
-    /// Null indicates no tail, not an untyped tail.
-    tail_type: ?*Node,
+    name: Name,
+    defaultValue: [*c]Type = null,
 };
 
-/// used by GenericType and GenericTypePack
-pub const NameNodeData = extern struct {
-    name: [*:0]const u8,
-    default_type: ?*Node = null,
+pub const GenericTypePack = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    name: Name,
+    defaultValue: [*c]Node = null,
 };
 
-pub const GenericType = opaque {
-    extern fn Luau_Ast_GenericType_get(name: *GenericType) callconv(.c) NameNodeData;
+pub const ExprGroup = extern struct {
+    vtable: *const anyopaque,
 
-    pub inline fn get(self: *GenericType) NameNodeData {
-        return Luau_Ast_GenericType_get(self);
-    }
+    classIndex: Node.Kind,
+    location: Location,
+
+    expr: [*c]Node,
 };
 
-pub const GenericTypePack = opaque {
-    extern fn Luau_Ast_GenericTypePack_get(name: *GenericTypePack) callconv(.c) NameNodeData;
+pub const ExprConstantNil = extern struct {
+    vtable: *const anyopaque,
 
-    pub inline fn get(self: *GenericTypePack) NameNodeData {
-        return Luau_Ast_GenericTypePack_get(self);
-    }
+    classIndex: Node.Kind,
+    location: Location,
 };
 
-pub const ExprGroup = opaque {
-    extern fn Luau_Ast_ExprGroup_get(*ExprGroup) callconv(.c) *Node;
+pub const ExprConstantBool = extern struct {
+    vtable: *const anyopaque,
 
-    pub inline fn get(self: *ExprGroup) *Node {
-        return Luau_Ast_ExprGroup_get(self);
-    }
+    classIndex: Node.Kind,
+    location: Location,
+
+    value: bool,
 };
 
-pub const ExprConstantBool = opaque {
-    extern fn Luau_Ast_ExprConstantBool_get(*ExprConstantBool) callconv(.c) bool;
-
-    pub inline fn get(self: *ExprConstantBool) bool {
-        return Luau_Ast_ExprConstantBool_get(self);
-    }
+pub const ConstantNumberParseResult = enum(c_int) {
+    Ok = 0,
+    Imprecise = 1,
+    Malformed = 2,
+    BinOverflow = 3,
+    HexOverflow = 4,
 };
 
-pub const ExprConstantNumber = opaque {
-    pub const NumberParseResult = enum(u32) {
-        ok,
-        imprecise,
-        malformed,
-        bin_overflow,
-        hex_overflow,
+pub const ExprConstantNumber = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    value: f64,
+    parseResult: ConstantNumberParseResult,
+};
+
+pub const ExprConstantString = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    value: Array(u8),
+    quoteStyle: QuoteStyle,
+
+    pub const QuoteStyle = enum(c_int) {
+        QuotedSimple = 0,
+        QuotedRaw = 1,
+        Unquoted = 2,
     };
-
-    pub const Data = extern struct {
-        value: f64,
-        parse_result: NumberParseResult,
-    };
-
-    extern fn Luau_Ast_ExprConstantNumber_get(*ExprConstantNumber) callconv(.c) Data;
-
-    pub inline fn get(self: *ExprConstantNumber) Data {
-        return Luau_Ast_ExprConstantNumber_get(self);
-    }
 };
 
-pub const ExprConstantString = opaque {
-    pub const QuoteStyle = enum(u32) {
-        simple,
-        raw,
-        unquoted,
-    };
+pub const ExprLocal = extern struct {
+    vtable: *const anyopaque,
 
-    pub const Data = extern struct {
-        value: [*:0]const u8,
-        len: usize,
-        quote_style: QuoteStyle,
+    classIndex: Node.Kind,
+    location: Location,
 
-        pub fn string(self: Data) [:0]const u8 {
-            return self.value[0..self.len];
-        }
-    };
-
-    extern fn Luau_Ast_ExprConstantString_get(*ExprConstantString) callconv(.c) Data;
-
-    pub inline fn get(self: *ExprConstantString) Data {
-        return Luau_Ast_ExprConstantString_get(self);
-    }
+    local: [*c]Local,
+    upvalue: bool,
 };
 
-pub const Local = opaque {
-    pub const Data = extern struct {
-        name: [*:0]const u8,
-        location: zig_Location,
-        shadow: ?*Local,
-        function_depth: usize,
-        loop_depth: usize,
-        annotation: ?*Node,
-    };
+pub const ExprGlobal = extern struct {
+    vtable: *const anyopaque,
 
-    extern fn Luau_Ast_Local_get(*Local) callconv(.c) Data;
+    classIndex: Node.Kind,
+    location: Location,
 
-    pub inline fn get(self: *Local) Data {
-        return Luau_Ast_Local_get(self);
-    }
+    name: Name,
 };
 
-pub const ExprLocal = opaque {
-    pub const Data = extern struct {
-        local: *Local,
-        upvalue: bool,
-    };
+pub const ExprVarargs = extern struct {
+    vtable: *const anyopaque,
 
-    extern fn Luau_Ast_ExprLocal_get(*ExprLocal) callconv(.c) Data;
-
-    pub inline fn get(self: *ExprLocal) Data {
-        return Luau_Ast_ExprLocal_get(self);
-    }
+    classIndex: Node.Kind,
+    location: Location,
 };
 
-pub const ExprGlobal = opaque {
-    extern fn Luau_Ast_ExprGlobal_get_name(*ExprGlobal) callconv(.c) [*:0]const u8;
+pub const ExprCall = extern struct {
+    vtable: *const anyopaque,
 
-    pub inline fn getName(self: *ExprGlobal) []const u8 {
-        return std.mem.span(Luau_Ast_ExprGlobal_get_name(self));
-    }
+    classIndex: Node.Kind,
+    location: Location,
+
+    func: [*c]Node,
+    args: Array([*c]Node),
+    self: bool,
+    argLocation: Location,
 };
 
-pub const ExprCall = opaque {
-    pub const Data = extern struct {
-        function: *Node,
-        args: [*]const *Node,
-        args_len: usize,
-        self: bool,
-        arg_location: zig_Location,
-    };
+pub const ExprIndexName = extern struct {
+    vtable: *const anyopaque,
 
-    extern fn Luau_Ast_ExprCall_get(*ExprCall) callconv(.c) Data;
+    classIndex: Node.Kind,
+    location: Location,
 
-    pub inline fn get(self: *ExprCall) Data {
-        return Luau_Ast_ExprCall_get(self);
-    }
+    expr: [*c]Node,
+    index: Name,
+    indexLocation: Location,
+    opPosition: Position,
+    op: u8,
 };
 
-pub const ExprIndexName = opaque {
-    pub const Data = extern struct {
-        expr: *Node,
-        index: [*:0]const u8,
-        index_location: zig_Location,
-        op_position: zig_Position,
-        op: u8,
-    };
+pub const ExprIndexExpr = extern struct {
+    vtable: *const anyopaque,
 
-    extern fn Luau_Ast_ExprIndexName_get(*ExprIndexName) callconv(.c) Data;
+    classIndex: Node.Kind,
+    location: Location,
 
-    pub inline fn get(self: *ExprIndexName) Data {
-        return Luau_Ast_ExprIndexName_get(self);
-    }
+    expr: [*c]Node,
+    index: [*c]Node,
 };
 
-pub const ExprIndexExpr = opaque {
-    pub const Data = extern struct {
-        expr: *Node,
-        index: *Node,
-    };
+pub const ExprFunction = extern struct {
+    vtable: *const anyopaque,
 
-    extern fn Luau_Ast_ExprIndexExpr_get(*ExprIndexExpr) callconv(.c) Data;
+    classIndex: Node.Kind,
+    location: Location,
 
-    pub inline fn get(self: *ExprIndexExpr) Data {
-        return Luau_Ast_ExprIndexExpr_get(self);
-    }
+    attributes: Array([*c]Attr),
+    generics: Array([*c]GenericType),
+    genericPacks: Array([*c]GenericTypePack),
+    self: [*c]Local,
+    args: Array([*c]Local),
+    returnAnnotation: Optional(TypeList),
+    vararg: bool = false,
+    varargLocation: Location,
+    varargAnnotation: [*c]Node,
+    body: [*c]StatBlock,
+    functionDepth: usize,
+    debugname: Name,
+    argLocation: Optional(Location),
 };
 
-pub const ExprFunction = opaque {
-    pub const Data = extern struct {
-        attributes_: [*]Attr,
-        attributes_len: usize,
-        generics_: [*]GenericType,
-        generics_len: usize,
-        generic_packs_: [*]GenericTypePack,
-        generic_packs_len: usize,
-        self: *Local,
-        args_: [*]Local,
-        args_len: usize,
-        has_return_annotation: bool,
-        return_annotation: TypeList,
-        vararg: bool,
-        vararg_location: zig_Location,
-        body: *StatBlock,
-        function_depth: usize,
-        debug_name: ?[*:0]const u8,
-        has_arg_location: bool,
-        arg_location: zig_Location,
+pub const ExprTable = extern struct {
+    vtable: *const anyopaque,
 
-        pub inline fn attributes(self: Data) []Attr {
-            return self.attributes_[0..self.attributes_len];
-        }
+    classIndex: Node.Kind,
+    location: Location,
 
-        pub inline fn generics(self: Data) []GenericType {
-            return self.generics_[0..self.generics_len];
-        }
+    items: Array(Item),
 
-        pub inline fn genericPacks(self: Data) []GenericTypePack {
-            return self.generic_packs_[0..self.generic_packs_len];
-        }
-
-        pub inline fn args(self: Data) []Local {
-            return self.args_[0..self.args_len];
-        }
-    };
-
-    extern fn Luau_Ast_ExprFunction_get(*ExprFunction) callconv(.c) Data;
-
-    pub inline fn get(self: *ExprFunction) Data {
-        return Luau_Ast_ExprFunction_get(self);
-    }
-};
-
-pub const ExprTable = opaque {
     pub const Item = extern struct {
-        pub const Kind = enum(u32) { list, record, general };
-        kind: Kind,
+        pub const Kind = extern struct {
+            bits: c_int = 0,
+
+            /// foo, in which case key is a nullptr
+            pub const List: Kind = .{ .bits = 0 };
+            /// foo=bar, in which case key is a ExprConstantString
+            pub const Record: Kind = .{ .bits = 1 };
+            /// [foo]=bar
+            pub const General: Kind = .{ .bits = 2 };
+
+            // pub usingnamespace cpp.FlagsMixin(Kind);
+        };
+
+        kind: Node.Kind,
+        /// can be nullptr!
         key: ?*Node,
         value: *Node,
     };
-
-    extern fn Luau_Ast_ExprTable_get_items(*ExprTable, len: *usize) callconv(.c) [*]const Item;
-
-    pub inline fn getItems(self: *ExprTable) []const Item {
-        var len: usize = 0;
-        const items = Luau_Ast_ExprTable_get_items(self, &len);
-        return items[0..len];
-    }
 };
 
-test ExprTable {
-    {
-        var context = TestParseContext.init();
-        defer context.deinit();
+pub const ExprUnary = extern struct {
+    vtable: *const anyopaque,
 
-        const source =
-            \\local x = {
-            \\    a = 1,
-            \\    b = 2,
-            \\    c = 3,
-            \\    0,
-            \\    ["bale key"] = 4,
-            \\}
-            \\
-        ;
-        const parsed = context.parseContent(source);
-        defer parsed.deinit();
+    classIndex: Node.Kind,
+    location: Location,
 
-        const root = parsed.getRoot();
-        const kind = root.kind();
-        try std.testing.expectEqual(NodeKind.stat_block, kind);
-        const as_stat_block = root.cast(.stat_block);
-        try std.testing.expect(as_stat_block != null);
-        const statements = as_stat_block.?.getStatements();
-        try std.testing.expectEqual(1, statements.len);
+    op: Op,
+    expr: [*c]Node,
 
-        const statement = statements[0];
-        try std.testing.expectEqual(NodeKind.stat_local, statement.kind());
-        const as_stat_local: *StatLocal = statement.cast(.stat_local) orelse unreachable;
-        const vars = as_stat_local.get().values();
-        try std.testing.expectEqual(1, vars.len);
-        const var0 = vars[0];
-        try std.testing.expectEqual(NodeKind.expr_table, var0.kind());
-        const as_expr_table: *ExprTable = var0.cast(.expr_table) orelse unreachable;
-        const items = as_expr_table.getItems();
-        try std.testing.expectEqual(5, items.len);
-
-        for (items) |item| {
-            switch (item.kind) {
-                .list => {
-                    try std.testing.expect(item.key == null);
-                },
-                .record => {
-                    try std.testing.expect(item.key != null);
-                },
-                .general => {
-                    try std.testing.expect(item.key != null);
-                },
-            }
-        }
-    }
-}
-
-pub const ExprUnary = opaque {
-    pub const Data = extern struct {
-        op: enum(u32) { not, minus, len },
-        expr: *Node,
+    pub const Op = enum(c_int) {
+        Not = 0,
+        Minus = 1,
+        Len = 2,
     };
-
-    extern fn Luau_Ast_ExprUnary_get(*ExprUnary) callconv(.c) Data;
-
-    pub inline fn get(self: *ExprUnary) Data {
-        return Luau_Ast_ExprUnary_get(self);
-    }
 };
 
-pub const ExprBinary = opaque {
-    pub const Data = extern struct {
-        op: enum(u32) {
-            add,
-            sub,
-            mul,
-            div,
-            floor_div,
-            mod,
-            pow,
-            concat,
-            compare_ne,
-            compare_eq,
-            compare_lt,
-            compare_le,
-            compare_gt,
-            compare_ge,
-            @"and",
-            @"or",
-        },
-        left: *Node,
-        right: *Node,
+pub const ExprBinary = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    op: Op,
+    left: [*c]Node,
+    right: [*c]Node,
+
+    pub const Op = enum(c_int) {
+        Add = 0,
+        Sub = 1,
+        Mul = 2,
+        Div = 3,
+        FloorDiv = 4,
+        Mod = 5,
+        Pow = 6,
+        Concat = 7,
+        CompareNe = 8,
+        CompareEq = 9,
+        CompareLt = 10,
+        CompareLe = 11,
+        CompareGt = 12,
+        CompareGe = 13,
+        And = 14,
+        Or = 15,
+        __Count = 16,
     };
-
-    extern fn Luau_Ast_ExprBinary_get(*ExprBinary) callconv(.c) Data;
-
-    pub inline fn get(self: *ExprBinary) Data {
-        return Luau_Ast_ExprBinary_get(self);
-    }
 };
 
-pub const StatBlock = opaque {
-    extern fn Luau_Ast_StatBlock_get_statements(*StatBlock, len: *usize) callconv(.c) [*]const *Node;
+pub const ExprTypeAssertion = extern struct {
+    vtable: *const anyopaque,
 
-    pub inline fn getStatements(self: *StatBlock) []const *Node {
-        var len: usize = 0;
-        const statements = Luau_Ast_StatBlock_get_statements(self, &len);
-        return statements[0..len];
-    }
+    classIndex: Node.Kind,
+    location: Location,
+
+    expr: [*c]Node,
+    annotation: [*c]Type,
 };
 
-test StatBlock {
-    {
-        var context = TestParseContext.init();
-        defer context.deinit();
+pub const ExprIfElse = extern struct {
+    vtable: *const anyopaque,
 
-        const source =
-            \\local x: number = 1
-            \\local y = 2
-            \\local z = 3
-            \\
-        ;
-        const parsed = context.parseContent(source);
-        defer parsed.deinit();
+    classIndex: Node.Kind,
+    location: Location,
 
-        const root = parsed.getRoot();
-        const kind = root.kind();
-        try std.testing.expectEqual(NodeKind.stat_block, kind);
-        const as_stat_block = root.cast(.stat_block);
-        try std.testing.expect(as_stat_block != null);
-        const statements = as_stat_block.?.getStatements();
-        try std.testing.expectEqual(3, statements.len);
+    condition: [*c]Node,
+    hasThen: bool,
+    trueExpr: [*c]Node,
+    hasElse: bool,
+    falseExpr: [*c]Node,
+};
 
-        for (statements) |statement| {
-            try std.testing.expectEqual(NodeKind.stat_local, statement.kind());
-            const as_stat_local: *StatLocal = statement.cast(.stat_local) orelse continue;
-            std.debug.print("local {s} {?}\n", .{
-                as_stat_local.get().vars()[0].get().name,
-                as_stat_local.get().vars()[0].get().annotation,
-            });
-        }
-    }
-}
+pub const ExprInterpString = extern struct {
+    vtable: *const anyopaque,
 
-pub const StatLocal = opaque {
-    pub const Data = extern struct {
-        vars_: [*]*Local,
-        vars_len: usize,
-        values_: [*]*Node,
-        values_len: usize,
+    classIndex: Node.Kind,
+    location: Location,
 
-        has_equals_sign_location: bool,
-        equals_sign_location: zig_Location,
+    /// An interpolated string such as `foo{bar}baz` is represented as
+    /// an array of strings for "foo" and "bar", and an array of expressions for "baz".
+    /// `strings` will always have one more element than `expressions`.
+    strings: Array(Array(u8)),
+    expressions: Array([*c]Node),
+};
 
-        pub inline fn vars(self: Data) []*Local {
-            return self.vars_[0..self.vars_len];
-        }
+pub const StatBlock = extern struct {
+    vtable: *const anyopaque,
 
-        pub inline fn values(self: Data) []const *Node {
-            return self.values_[0..self.values_len];
-        }
-    };
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
 
-    extern fn Luau_Ast_StatLocal_get(*StatLocal) callconv(.c) Data;
+    body: Array(*Node),
+    /// Indicates whether or not this block has been terminated in a
+    /// syntactically valid way.
+    ///
+    /// This is usually but not always done with the 'end' keyword.  StatIf
+    /// and StatRepeat are the two main exceptions to this.
+    ///
+    /// The 'then' clause of an if statement can properly be closed by the
+    /// keywords 'else' or 'elseif'.  A 'repeat' loop's body is closed with the
+    /// 'until' keyword.
+    hasEnd: bool = false,
+};
 
-    pub inline fn get(self: *StatLocal) Data {
-        return Luau_Ast_StatLocal_get(self);
-    }
+pub const StatIf = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    condition: [*c]Node,
+    thenbody: [*c]StatBlock,
+    elsebody: ?*Node,
+    thenLocation: Optional(Location),
+    /// Active for 'elseif' as well
+    elseLocation: Optional(Location),
+};
+
+pub const StatWhile = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    condition: [*c]Node,
+    body: [*c]StatBlock,
+    hasDo: bool = false,
+    doLocation: Location,
+};
+
+pub const StatRepeat = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    condition: [*c]Node,
+    body: [*c]StatBlock,
+    DEPRECATED_hasUntil: bool = false,
+};
+
+pub const StatBreak = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+};
+
+pub const StatContinue = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+};
+
+pub const StatReturn = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    list: Array([*c]Node),
+};
+
+pub const StatExpr = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    expr: [*c]Node,
+};
+
+pub const StatLocal = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    vars: Array(*Local),
+    values: Array(*Node),
+    equalsSignLocation: Optional(Location),
+};
+
+pub const StatFor = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    variable: [*c]Local,
+    from: [*c]Node,
+    to: [*c]Node,
+    step: [*c]Node,
+    body: [*c]StatBlock,
+    hasDo: bool = false,
+    doLocation: Location,
+};
+
+pub const StatForIn = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    vars: Array([*c]Local),
+    values: Array([*c]Node),
+    body: [*c]StatBlock,
+    hasIn: bool = false,
+    inLocation: Location,
+    hasDo: bool = false,
+    doLocation: Location,
+};
+
+pub const StatAssign = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    vars: Array([*c]Node),
+    values: Array([*c]Node),
+};
+
+pub const StatCompoundAssign = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    op: ExprBinary.Op,
+    variable: [*c]Node,
+    value: [*c]Node,
+};
+
+pub const StatFunction = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    name: [*c]Node,
+    func: [*c]ExprFunction,
+};
+
+pub const StatLocalFunction = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    name: [*c]Local,
+    func: [*c]ExprFunction,
+};
+
+pub const StatTypeAlias = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    name: Name,
+    nameLocation: Location,
+    generics: Array([*c]GenericType),
+    genericPacks: Array([*c]GenericTypePack),
+    type: [*c]Type,
+    exported: bool,
+};
+
+pub const StatTypeFunction = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    name: Name,
+    nameLocation: Location,
+    body: [*c]ExprFunction,
+    exported: bool,
+};
+
+pub const StatDeclareGlobal = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    name: Name,
+    nameLocation: Location,
+    type: [*c]Type,
+};
+
+pub const ArgumentName = extern struct {
+    name: Name,
+    location: Location,
+};
+
+pub const StatDeclareFunction = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    attributes: Array([*c]Attr),
+    name: Name,
+    nameLocation: Location,
+    generics: Array([*c]GenericType),
+    genericPacks: Array([*c]GenericTypePack),
+    params: TypeList,
+    paramNames: Array(ArgumentName),
+    vararg: bool = false,
+    varargLocation: Location,
+    retTypes: TypeList,
+};
+
+pub const DeclaredClassProp = extern struct {
+    name: Name,
+    nameLocation: Location,
+    ty: [*c]Type = null,
+    isMethod: bool = false,
+    location: Location,
+};
+
+pub const TableAccess = enum(c_int) {
+    Read = 1,
+    Write = 2,
+    ReadWrite = 3,
+};
+
+pub const TableIndexer = extern struct {
+    indexType: [*c]Type,
+    resultType: [*c]Type,
+    location: Location,
+    access: TableAccess = .ReadWrite,
+    accessLocation: Optional(Location),
+};
+
+pub const StatDeclareClass = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    name: Name,
+    superName: Optional(Name),
+    props: Array(DeclaredClassProp),
+    indexer: [*c]TableIndexer,
+};
+
+pub const Type = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+};
+
+/// Don't have Luau::Variant available, it's a bit of an overhead, but a plain struct is nice to use
+pub const TypeOrPack = extern struct {
+    type: [*c]Type = null,
+    typePack: [*c]Node = null,
+};
+
+pub const TypeReference = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    hasParameterList: bool,
+    prefix: Optional(Name),
+    prefixLocation: Optional(Location),
+    name: Name,
+    nameLocation: Location,
+    parameters: Array(TypeOrPack),
+};
+
+pub const TableProp = extern struct {
+    name: Name,
+    location: Location,
+    type: [*c]Type,
+    access: TableAccess = .ReadWrite,
+    accessLocation: Optional(Location),
+};
+
+pub const TypeTable = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    props: Array(TableProp),
+    indexer: [*c]TableIndexer,
+};
+
+pub const TypeFunction = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    attributes: Array([*c]Attr),
+    generics: Array([*c]GenericType),
+    genericPacks: Array([*c]GenericTypePack),
+    argTypes: TypeList,
+    argNames: Array(Optional(ArgumentName)),
+    returnTypes: TypeList,
+};
+
+pub const TypeTypeof = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    expr: [*c]Node,
+};
+
+pub const TypeUnion = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    types: Array([*c]Type),
+};
+
+pub const TypeIntersection = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    types: Array([*c]Type),
+};
+
+pub const ExprError = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    expressions: Array([*c]Node),
+    messageIndex: c_uint,
+};
+
+pub const StatError = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+    MAYBE_hasSemicolon: bool = false,
+
+    expressions: Array([*c]Node),
+    statements: Array([*c]Node),
+    messageIndex: c_uint,
+};
+
+pub const TypeError = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    types: Array([*c]Type),
+    isMissing: bool,
+    messageIndex: c_uint,
+};
+
+pub const TypeSingletonBool = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    value: bool,
+};
+
+pub const TypeSingletonString = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    value: Array(u8),
+};
+
+pub const TypeGroup = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    type: [*c]Type,
+};
+
+pub const TypePackExplicit = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    typeList: TypeList,
+};
+
+pub const TypePackVariadic = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    variadicType: [*c]Type,
+};
+
+pub const TypePackGeneric = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    genericName: Name,
 };
 
 test Node {
@@ -867,9 +1227,9 @@ test Node {
         var table = NameTable.init(a);
         defer table.deinit();
         const source =
-            \\local x = 1
-            \\local y = 2
-            \\local z = 3
+            \\local x = 1;
+            \\local x = 2
+            \\local x = 3
             \\
         ;
 
@@ -878,7 +1238,21 @@ test Node {
 
         const root = parse_result.getRoot();
 
-        const kind = root.kind();
-        try std.testing.expectEqual(NodeKind.stat_block, kind);
+        try std.testing.expectEqual(Node.Kind.stat_block, root.classIndex);
+        const block: *StatBlock = root.cast(.stat_block).?;
+
+        const stats = block.body.slice();
+        try std.testing.expectEqual(3, stats.len);
+
+        for (stats) |node| {
+            switch (node.classIndex) {
+                .stat_local => {
+                    const local: *StatLocal = node.cast(.stat_local).?;
+                    try std.testing.expectEqualStrings("x", std.mem.span(local.vars.slice()[0].name.value));
+                    std.log.err("{}", .{(local.values.slice()[0].cast(.expr_constant_number).?.value)});
+                },
+                else => {},
+            }
+        }
     }
 }
