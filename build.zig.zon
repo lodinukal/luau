@@ -1,6 +1,7 @@
 .{
     .name = "luau",
-    .version = "0.661.0",
+    .version = "0.662.0",
+    .minimum_zig_version = "0.14.0-dev.3286+05d8b565a",
     .dependencies = .{},
     .paths = .{
         "Analysis",

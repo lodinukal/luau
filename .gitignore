@@ -22,3 +22,4 @@ __pycache__
 
 .zig-cache
 zig-out
+compile_commands.json

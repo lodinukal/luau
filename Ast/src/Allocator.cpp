@@ -1,34 +1,61 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 
 #include "Luau/Allocator.h"
+#include <iostream>
+
+static void* luauDefaultMallocPtr(void* ctx, size_t size)
+{
+    return malloc(size);
+}
+
+// wrap free
+static void luauDefaultFreePtr(void* ctx, void* ptr)
+{
+    free(ptr);
+}
+
+static Luau::AllocatorVTable CVTableAllocator = {luauDefaultMallocPtr, luauDefaultFreePtr};
 
 namespace Luau
 {
 
 Allocator::Allocator()
-    : root(static_cast<Page*>(operator new(sizeof(Page))))
+    : root(nullptr)
     , offset(0)
+    , vtable(CVTableAllocator)
+    , ctx(nullptr)
 {
-    root->next = nullptr;
+    allocate(0);
 }
 
 Allocator::Allocator(Allocator&& rhs)
     : root(rhs.root)
     , offset(rhs.offset)
+    , vtable(rhs.vtable)
+    , ctx(rhs.ctx)
 {
     rhs.root = nullptr;
     rhs.offset = 0;
+}
+
+Allocator::Allocator(void* ctx, AllocatorVTable vtable)
+    : root(nullptr)
+    , offset(0)
+    , vtable(vtable)
+    , ctx(ctx)
+{
+    allocate(0);
 }
 
 Allocator::~Allocator()
 {
     Page* page = root;
 
-    while (page)
+    while (page != nullptr)
     {
         Page* next = page->next;
 
-        operator delete(page);
+        vtable.freePtr(ctx, page);
 
         page = next;
     }
@@ -38,7 +65,7 @@ void* Allocator::allocate(size_t size)
 {
     constexpr size_t align = alignof(void*) > alignof(double) ? alignof(void*) : alignof(double);
 
-    if (root)
+    if (root != nullptr)
     {
         uintptr_t data = reinterpret_cast<uintptr_t>(root->data);
         uintptr_t result = (data + offset + align - 1) & ~(align - 1);
@@ -51,7 +78,7 @@ void* Allocator::allocate(size_t size)
 
     // allocate new page
     size_t pageSize = size > sizeof(root->data) ? size : sizeof(root->data);
-    void* pageData = operator new(offsetof(Page, data) + pageSize);
+    void* pageData = vtable.mallocPtr(ctx, offsetof(Page, data) + pageSize);
 
     Page* page = static_cast<Page*>(pageData);
 

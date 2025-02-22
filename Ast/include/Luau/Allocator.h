@@ -11,11 +11,21 @@
 namespace Luau
 {
 
+constexpr size_t DEFAULT_ALLOCATOR_PAGE_SIZE = 8192;
+constexpr size_t DEFAULT_ALLOCATOR_ALIGNMENT = 8;
+
+extern "C" struct AllocatorVTable
+{
+    void* (*mallocPtr)(void* ctx, size_t size);
+    void (*freePtr)(void* ctx, void* ptr);
+};
+
 class Allocator
 {
 public:
     Allocator();
     Allocator(Allocator&&);
+    Allocator(void* ctx, AllocatorVTable vtable);
 
     Allocator& operator=(Allocator&&) = delete;
 
@@ -38,11 +48,14 @@ private:
     {
         Page* next;
 
-        alignas(8) char data[8192];
+        alignas(DEFAULT_ALLOCATOR_ALIGNMENT) char data[DEFAULT_ALLOCATOR_PAGE_SIZE];
     };
 
     Page* root;
     size_t offset;
+
+    AllocatorVTable vtable;
+    void* ctx;
 };
 
 } // namespace Luau
