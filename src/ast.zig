@@ -298,7 +298,7 @@ pub const Local = extern struct {
     shadow: [*c]Local,
     functionDepth: usize,
     loopDepth: usize,
-    annotation: [*c]Type,
+    annotation: [*c]Node,
 };
 
 // matches layout of optional for msvc and clang
@@ -329,7 +329,7 @@ pub fn Array(comptime T: type) type {
 }
 
 pub const TypeList = extern struct {
-    types: Array([*c]Type),
+    types: Array([*c]Node),
     /// Null indicates no tail, not an untyped tail.
     tailType: [*c]Node = null,
 };
@@ -479,7 +479,7 @@ pub const Attr = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    kind: Type,
+    kind: Node,
 
     pub const Kind = enum(c_int) {
         checked = 0,
@@ -494,7 +494,7 @@ pub const GenericType = extern struct {
     location: Location,
 
     name: Name,
-    defaultValue: [*c]Type = null,
+    defaultValue: [*c]Node = null,
 };
 
 pub const GenericTypePack = extern struct {
@@ -731,7 +731,7 @@ pub const ExprTypeAssertion = extern struct {
     location: Location,
 
     expr: [*c]Node,
-    annotation: [*c]Type,
+    annotation: [*c]Node,
 };
 
 pub const ExprIfElse = extern struct {
@@ -956,7 +956,7 @@ pub const StatTypeAlias = extern struct {
     nameLocation: Location,
     generics: Array([*c]GenericType),
     genericPacks: Array([*c]GenericTypePack),
-    type: [*c]Type,
+    type: [*c]Node,
     exported: bool,
 };
 
@@ -982,7 +982,7 @@ pub const StatDeclareGlobal = extern struct {
 
     name: Name,
     nameLocation: Location,
-    type: [*c]Type,
+    type: [*c]Node,
 };
 
 pub const ArgumentName = extern struct {
@@ -1012,7 +1012,7 @@ pub const StatDeclareFunction = extern struct {
 pub const DeclaredClassProp = extern struct {
     name: Name,
     nameLocation: Location,
-    ty: [*c]Type = null,
+    ty: [*c]Node = null,
     isMethod: bool = false,
     location: Location,
 };
@@ -1024,8 +1024,8 @@ pub const TableAccess = enum(c_int) {
 };
 
 pub const TableIndexer = extern struct {
-    indexType: [*c]Type,
-    resultType: [*c]Type,
+    indexType: [*c]Node,
+    resultType: [*c]Node,
     location: Location,
     access: TableAccess = .ReadWrite,
     accessLocation: Optional(Location),
@@ -1044,16 +1044,9 @@ pub const StatDeclareClass = extern struct {
     indexer: [*c]TableIndexer,
 };
 
-pub const Type = extern struct {
-    vtable: *const anyopaque,
-
-    classIndex: Node.Kind,
-    location: Location,
-};
-
 /// Don't have Luau::Variant available, it's a bit of an overhead, but a plain struct is nice to use
 pub const TypeOrPack = extern struct {
-    type: [*c]Type = null,
+    type: [*c]Node = null,
     typePack: [*c]Node = null,
 };
 
@@ -1074,7 +1067,7 @@ pub const TypeReference = extern struct {
 pub const TableProp = extern struct {
     name: Name,
     location: Location,
-    type: [*c]Type,
+    type: [*c]Node,
     access: TableAccess = .ReadWrite,
     accessLocation: Optional(Location),
 };
@@ -1118,7 +1111,7 @@ pub const TypeUnion = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    types: Array([*c]Type),
+    types: Array([*c]Node),
 };
 
 pub const TypeIntersection = extern struct {
@@ -1127,7 +1120,7 @@ pub const TypeIntersection = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    types: Array([*c]Type),
+    types: Array([*c]Node),
 };
 
 pub const ExprError = extern struct {
@@ -1158,7 +1151,7 @@ pub const TypeError = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    types: Array([*c]Type),
+    types: Array([*c]Node),
     isMissing: bool,
     messageIndex: c_uint,
 };
@@ -1187,7 +1180,7 @@ pub const TypeGroup = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    type: [*c]Type,
+    type: [*c]Node,
 };
 
 pub const TypePackExplicit = extern struct {
@@ -1205,7 +1198,7 @@ pub const TypePackVariadic = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    variadicType: [*c]Type,
+    variadicType: [*c]Node,
 };
 
 pub const TypePackGeneric = extern struct {
