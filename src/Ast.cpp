@@ -468,6 +468,31 @@ EXPORT Luau::AstExprTable::Item* ZIG_LUAU_AST(ExprTable_get_items)(Luau::AstExpr
     return value->items.data;
 }
 
+// ExprUnary
+EXPORT struct zig_ExprUnary
+{
+    Luau::AstExprUnary::Op op;
+    Luau::AstExpr* expr;
+};
+
+EXPORT zig_ExprUnary ZIG_LUAU_AST(ExprUnary_get)(Luau::AstExprUnary* value)
+{
+    return {value->op, value->expr};
+}
+
+// ExprBinary
+EXPORT struct zig_ExprBinary
+{
+    Luau::AstExprBinary::Op op;
+    Luau::AstExpr* left;
+    Luau::AstExpr* right;
+};
+
+EXPORT zig_ExprBinary ZIG_LUAU_AST(ExprBinary_get)(Luau::AstExprBinary* value)
+{
+    return {value->op, value->left, value->right};
+}
+
 // StatLocal
 EXPORT struct zig_StatLocal
 {

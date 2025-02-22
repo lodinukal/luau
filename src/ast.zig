@@ -336,6 +336,7 @@ pub const NodeKind = enum(c_int) {
     expr_table,
     expr_unary,
     expr_binary,
+    //
     expr_type_assertion,
     expr_if_else,
     expr_interp_string,
@@ -393,6 +394,8 @@ pub const NodeKind = enum(c_int) {
             .expr_index_expr => ExprIndexExpr,
             .expr_function => ExprFunction,
             .expr_table => ExprTable,
+            .expr_unary => ExprUnary,
+            .expr_binary => ExprBinary,
             .stat_block => StatBlock,
             .stat_local => StatLocal,
             else => |kind| @compileError(@tagName(kind) ++ " not implemented"),
@@ -685,6 +688,103 @@ pub const ExprTable = opaque {
         var len: usize = 0;
         const items = Luau_Ast_ExprTable_get_items(self, &len);
         return items[0..len];
+    }
+};
+
+test ExprTable {
+    {
+        var context = TestParseContext.init();
+        defer context.deinit();
+
+        const source =
+            \\local x = {
+            \\    a = 1,
+            \\    b = 2,
+            \\    c = 3,
+            \\    0,
+            \\    ["bale key"] = 4,
+            \\}
+            \\
+        ;
+        const parsed = context.parseContent(source);
+        defer parsed.deinit();
+
+        const root = parsed.getRoot();
+        const kind = root.kind();
+        try std.testing.expectEqual(NodeKind.stat_block, kind);
+        const as_stat_block = root.cast(.stat_block);
+        try std.testing.expect(as_stat_block != null);
+        const statements = as_stat_block.?.getStatements();
+        try std.testing.expectEqual(1, statements.len);
+
+        const statement = statements[0];
+        try std.testing.expectEqual(NodeKind.stat_local, statement.kind());
+        const as_stat_local: *StatLocal = statement.cast(.stat_local) orelse unreachable;
+        const vars = as_stat_local.get().values();
+        try std.testing.expectEqual(1, vars.len);
+        const var0 = vars[0];
+        try std.testing.expectEqual(NodeKind.expr_table, var0.kind());
+        const as_expr_table: *ExprTable = var0.cast(.expr_table) orelse unreachable;
+        const items = as_expr_table.getItems();
+        try std.testing.expectEqual(5, items.len);
+
+        for (items) |item| {
+            switch (item.kind) {
+                .list => {
+                    try std.testing.expect(item.key == null);
+                },
+                .record => {
+                    try std.testing.expect(item.key != null);
+                },
+                .general => {
+                    try std.testing.expect(item.key != null);
+                },
+            }
+        }
+    }
+}
+
+pub const ExprUnary = opaque {
+    pub const Data = extern struct {
+        op: enum(u32) { not, minus, len },
+        expr: *Node,
+    };
+
+    extern fn Luau_Ast_ExprUnary_get(*ExprUnary) callconv(.c) Data;
+
+    pub inline fn get(self: *ExprUnary) Data {
+        return Luau_Ast_ExprUnary_get(self);
+    }
+};
+
+pub const ExprBinary = opaque {
+    pub const Data = extern struct {
+        op: enum(u32) {
+            add,
+            sub,
+            mul,
+            div,
+            floor_div,
+            mod,
+            pow,
+            concat,
+            compare_ne,
+            compare_eq,
+            compare_lt,
+            compare_le,
+            compare_gt,
+            compare_ge,
+            @"and",
+            @"or",
+        },
+        left: *Node,
+        right: *Node,
+    };
+
+    extern fn Luau_Ast_ExprBinary_get(*ExprBinary) callconv(.c) Data;
+
+    pub inline fn get(self: *ExprBinary) Data {
+        return Luau_Ast_ExprBinary_get(self);
     }
 };
 
