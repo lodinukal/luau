@@ -14,6 +14,8 @@ LUAU_FASTFLAG(LuauSolverV2);
 LUAU_FASTFLAG(LuauAutocompleteRefactorsForIncrementalAutocomplete);
 LUAU_FASTFLAG(LuauTrackInteriorFreeTypesOnScope);
 LUAU_FASTFLAG(LuauFreeTypesMustHaveBounds)
+LUAU_FASTFLAG(LuauNonReentrantGeneralization)
+LUAU_FASTFLAG(LuauDisableNewSolverAssertsInMixedMode)
 
 namespace Luau
 {
@@ -304,7 +306,11 @@ TypePack extendTypePack(
             // also have to create a new tail.
 
             TypePack newPack;
-            newPack.tail = arena.freshTypePack(ftp->scope);
+            newPack.tail = arena.freshTypePack(ftp->scope, ftp->polarity);
+
+            if (FFlag::LuauNonReentrantGeneralization)
+                trackInteriorFreeTypePack(ftp->scope, *newPack.tail);
+
             if (FFlag::LuauSolverV2)
                 result.tail = newPack.tail;
             size_t overridesIndex = 0;
@@ -319,7 +325,7 @@ TypePack extendTypePack(
                 {
                     if (FFlag::LuauSolverV2)
                     {
-                        FreeType ft{ftp->scope, builtinTypes->neverType, builtinTypes->unknownType};
+                        FreeType ft{ftp->scope, builtinTypes->neverType, builtinTypes->unknownType, ftp->polarity};
                         t = arena.addType(ft);
                         if (FFlag::LuauTrackInteriorFreeTypesOnScope)
                             trackInteriorFreeType(ftp->scope, t);
@@ -550,7 +556,10 @@ std::vector<TypeId> findBlockedArgTypesIn(AstExprCall* expr, NotNull<DenseHashMa
 
 void trackInteriorFreeType(Scope* scope, TypeId ty)
 {
-    LUAU_ASSERT(FFlag::LuauSolverV2 && FFlag::LuauTrackInteriorFreeTypesOnScope);
+    if (FFlag::LuauDisableNewSolverAssertsInMixedMode)
+        LUAU_ASSERT(FFlag::LuauTrackInteriorFreeTypesOnScope);
+    else
+        LUAU_ASSERT(FFlag::LuauSolverV2 && FFlag::LuauTrackInteriorFreeTypesOnScope);
     for (; scope; scope = scope->parent.get())
     {
         if (scope->interiorFreeTypes)
@@ -563,6 +572,26 @@ void trackInteriorFreeType(Scope* scope, TypeId ty)
     // where `interiorFreeTypes` is present, which would be the one made
     // by ConstraintGenerator::visitModuleRoot.
     LUAU_ASSERT(!"No scopes in parent chain had a present `interiorFreeTypes` member.");
+}
+
+void trackInteriorFreeTypePack(Scope* scope, TypePackId tp)
+{
+    LUAU_ASSERT(tp);
+    if (!FFlag::LuauNonReentrantGeneralization)
+        return;
+
+    for (; scope; scope = scope->parent.get())
+    {
+        if (scope->interiorFreeTypePacks)
+        {
+            scope->interiorFreeTypePacks->push_back(tp);
+            return;
+        }
+    }
+    // There should at least be *one* generalization constraint per module
+    // where `interiorFreeTypes` is present, which would be the one made
+    // by ConstraintGenerator::visitModuleRoot.
+    LUAU_ASSERT(!"No scopes in parent chain had a present `interiorFreeTypePacks` member.");
 }
 
 } // namespace Luau

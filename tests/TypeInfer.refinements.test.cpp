@@ -9,7 +9,12 @@
 
 LUAU_FASTFLAG(LuauSolverV2)
 LUAU_FASTFLAG(DebugLuauEqSatSimplification)
-LUAU_FASTFLAG(LuauGeneralizationRemoveRecursiveUpperBound2)
+LUAU_FASTFLAG(LuauIntersectNotNil)
+LUAU_FASTFLAG(LuauSkipNoRefineDuringRefinement)
+LUAU_FASTFLAG(LuauFunctionCallsAreNotNilable)
+LUAU_FASTFLAG(LuauDoNotLeakNilInRefinement)
+LUAU_FASTFLAG(LuauSimplyRefineNotNil)
+LUAU_FASTFLAG(LuauWeakNilRefinementType)
 
 using namespace Luau;
 
@@ -666,6 +671,8 @@ TEST_CASE_FIXTURE(Fixture, "unknown_lvalue_is_not_synonymous_with_other_on_not_e
 
 TEST_CASE_FIXTURE(Fixture, "string_not_equal_to_string_or_nil")
 {
+    ScopedFastFlag _{FFlag::LuauWeakNilRefinementType, true};
+
     CheckResult result = check(R"(
         local t: {string} = {"hello"}
 
@@ -683,16 +690,8 @@ TEST_CASE_FIXTURE(Fixture, "string_not_equal_to_string_or_nil")
     CHECK_EQ(toString(requireTypeAtPosition({6, 29})), "string");  // a ~= b
     CHECK_EQ(toString(requireTypeAtPosition({6, 32})), "string?"); // a ~= b
 
-    if (FFlag::LuauSolverV2)
-    {
-        CHECK_EQ(toString(requireTypeAtPosition({8, 29})), "string?"); // a == b
-        CHECK_EQ(toString(requireTypeAtPosition({8, 32})), "string?"); // a == b
-    }
-    else
-    {
-        CHECK_EQ(toString(requireTypeAtPosition({8, 29})), "string");  // a == b
-        CHECK_EQ(toString(requireTypeAtPosition({8, 32})), "string?"); // a == b
-    }
+    CHECK_EQ(toString(requireTypeAtPosition({8, 29})), "string");  // a == b
+    CHECK_EQ(toString(requireTypeAtPosition({8, 32})), "string?"); // a == b
 }
 
 TEST_CASE_FIXTURE(Fixture, "narrow_property_of_a_bounded_variable")
@@ -730,6 +729,11 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "type_narrow_to_vector")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "nonoptional_type_can_narrow_to_nil_if_sense_is_true")
 {
+    ScopedFastFlag sffs[] = {
+        {FFlag::LuauSimplyRefineNotNil, true},
+        {FFlag::LuauWeakNilRefinementType, true},
+    };
+
     CheckResult result = check(R"(
         local t = {"hello"}
         local v = t[2]
@@ -748,27 +752,11 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "nonoptional_type_can_narrow_to_nil_if_sense_
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    if (FFlag::LuauSolverV2)
-    {
-        // CLI-115281 Types produced by refinements do not consistently get simplified
-        CHECK_EQ("(nil & string)?", toString(requireTypeAtPosition({4, 24}))); // type(v) == "nil"
-        CHECK_EQ(
-            "(boolean | buffer | class | function | number | string | table | thread) & string", toString(requireTypeAtPosition({6, 24}))
-        ); // type(v) ~= "nil"
+    CHECK_EQ("nil", toString(requireTypeAtPosition({4, 24})));    // type(v) == "nil"
+    CHECK_EQ("string", toString(requireTypeAtPosition({6, 24}))); // type(v) ~= "nil"
 
-        CHECK_EQ("(nil & string)?", toString(requireTypeAtPosition({10, 24}))); // equivalent to type(v) == "nil"
-        CHECK_EQ(
-            "(boolean | buffer | class | function | number | string | table | thread) & string", toString(requireTypeAtPosition({12, 24}))
-        ); // equivalent to type(v) ~= "nil"
-    }
-    else
-    {
-        CHECK_EQ("nil", toString(requireTypeAtPosition({4, 24})));    // type(v) == "nil"
-        CHECK_EQ("string", toString(requireTypeAtPosition({6, 24}))); // type(v) ~= "nil"
-
-        CHECK_EQ("nil", toString(requireTypeAtPosition({10, 24})));    // equivalent to type(v) == "nil"
-        CHECK_EQ("string", toString(requireTypeAtPosition({12, 24}))); // equivalent to type(v) ~= "nil"
-    }
+    CHECK_EQ("nil", toString(requireTypeAtPosition({10, 24})));    // equivalent to type(v) == "nil"
+    CHECK_EQ("string", toString(requireTypeAtPosition({12, 24}))); // equivalent to type(v) ~= "nil"
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "typeguard_not_to_be_string")
@@ -2019,14 +2007,10 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "type_annotations_arent_relevant_when_doing_d
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
+    // Function calls are treated as (potentially) `nil`, the same as table
+    // access, for UX.
     CHECK_EQ("nil", toString(requireTypeAtPosition({8, 28})));
-    if (FFlag::LuauSolverV2)
-    {
-        // CLI-115478 - This should be never
-        CHECK_EQ("nil", toString(requireTypeAtPosition({9, 28})));
-    }
-    else
-        CHECK_EQ("nil", toString(requireTypeAtPosition({9, 28})));
+    CHECK_EQ("nil", toString(requireTypeAtPosition({9, 28})));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "function_call_with_colon_after_refining_not_to_be_nil")
@@ -2444,8 +2428,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "remove_recursive_upper_bound_when_generalizi
 {
     ScopedFastFlag sffs[] = {
         {FFlag::LuauSolverV2, true},
+        {FFlag::LuauWeakNilRefinementType, true},
         {FFlag::DebugLuauEqSatSimplification, true},
-        {FFlag::LuauGeneralizationRemoveRecursiveUpperBound2, true},
     };
 
     LUAU_REQUIRE_NO_ERRORS(check(R"(
@@ -2456,7 +2440,131 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "remove_recursive_upper_bound_when_generalizi
         end
     )"));
 
-    CHECK_EQ("(nil & string)?", toString(requireTypeAtPosition({4, 24})));
+    CHECK_EQ("nil", toString(requireTypeAtPosition({4, 24})));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "nonnil_refinement_on_generic")
+{
+    ScopedFastFlag sff{FFlag::LuauIntersectNotNil, true};
+
+    CheckResult result = check(R"(
+        local function printOptional<T>(item: T?, printer: (T) -> string): string
+            if item ~= nil then
+                return printer(item)
+            else
+                return ""
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    if (FFlag::LuauSolverV2)
+        CHECK_EQ("T & ~nil", toString(requireTypeAtPosition({3, 31})));
+    else
+        CHECK_EQ("T", toString(requireTypeAtPosition({3, 31})));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "truthy_refinement_on_generic")
+{
+    ScopedFastFlag sff{FFlag::LuauIntersectNotNil, true};
+
+    CheckResult result = check(R"(
+        local function printOptional<T>(item: T?, printer: (T) -> string): string
+            if item then
+                return printer(item)
+            else
+                return ""
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    if (FFlag::LuauSolverV2)
+        CHECK_EQ("T & ~(false?)", toString(requireTypeAtPosition({3, 31})));
+    else
+        CHECK_EQ("T", toString(requireTypeAtPosition({3, 31})));
+}
+
+TEST_CASE_FIXTURE(Fixture, "truthy_call_of_function_with_table_value_as_argument_should_not_refine_value_as_never")
+{
+    ScopedFastFlag sff{FFlag::LuauSkipNoRefineDuringRefinement, true};
+
+    CheckResult result = check(R"(
+        type Item = {}
+
+        local function predicate(value: Item): boolean
+            return true
+        end
+
+        local function checkValue(value: Item)
+            if predicate(value) then
+                local _ = value
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK_EQ("Item", toString(requireTypeAtPosition({8, 27})));
+    CHECK_EQ("Item", toString(requireTypeAtPosition({9, 28})));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "function_calls_are_not_nillable")
+{
+    ScopedFastFlag _{FFlag::LuauDoNotLeakNilInRefinement, true};
+
+    LUAU_CHECK_NO_ERRORS(check(R"(
+        local BEFORE_SLASH_PATTERN = "^(.*)[\\/]"
+        function operateOnPath(path: string): string?
+            local fileName = string.gsub(path, BEFORE_SLASH_PATTERN, "")
+            if string.match(fileName, "^init%.") then
+                return "path=" .. fileName
+            end
+            return nil
+        end
+    )"));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "oss_1528_method_calls_are_not_nillable")
+{
+    ScopedFastFlag _{FFlag::LuauDoNotLeakNilInRefinement, true};
+
+    LUAU_CHECK_NO_ERRORS(check(R"(
+        type RunService = {
+            IsRunning: (RunService) -> boolean
+        }
+        type Game = {
+            GetRunService: (Game) -> RunService
+        }
+        local function getServices(g: Game): RunService
+            local service = g:GetRunService()
+            if service:IsRunning() then
+                return service
+            end
+            error("Oh no! The service isn't running!")
+        end
+    )"));
+}
+
+TEST_CASE_FIXTURE(Fixture, "oss_1687_equality_shouldnt_leak_nil")
+{
+    ScopedFastFlag _{FFlag::LuauWeakNilRefinementType, true};
+
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        --!strict
+        function returns_two(): number
+            return 2
+        end
+
+        function is_two(num: number): boolean
+            return num==2
+        end
+
+        local my_number = returns_two()
+
+        if my_number == 2 then
+            is_two(my_number) --type error, my_number: number?
+        end
+    )"));
 }
 
 TEST_SUITE_END();

@@ -13,6 +13,7 @@ LUAU_FASTINTVARIABLE(LuauTarjanChildLimit, 10000)
 LUAU_FASTFLAG(LuauSolverV2)
 LUAU_FASTINTVARIABLE(LuauTarjanPreallocationSize, 256)
 LUAU_FASTFLAG(LuauSyntheticErrors)
+LUAU_FASTFLAG(LuauDeprecatedAttribute)
 
 namespace Luau
 {
@@ -95,13 +96,15 @@ static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool a
             return dest.addType(a);
         else if constexpr (std::is_same_v<T, FunctionType>)
         {
-            FunctionType clone = FunctionType{a.level, a.scope, a.argTypes, a.retTypes, a.definition, a.hasSelf};
+            FunctionType clone = FunctionType{a.level, a.argTypes, a.retTypes, a.definition, a.hasSelf};
             clone.generics = a.generics;
             clone.genericPacks = a.genericPacks;
             clone.magic = a.magic;
             clone.tags = a.tags;
             clone.argNames = a.argNames;
             clone.isCheckedFunction = a.isCheckedFunction;
+            if (FFlag::LuauDeprecatedAttribute)
+                clone.isDeprecatedFunction = a.isDeprecatedFunction;
             return dest.addType(std::move(clone));
         }
         else if constexpr (std::is_same_v<T, TableType>)

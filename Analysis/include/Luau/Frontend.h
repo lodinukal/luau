@@ -10,7 +10,6 @@
 #include "Luau/Set.h"
 #include "Luau/TypeCheckLimits.h"
 #include "Luau/Variant.h"
-#include "Luau/AnyTypeSummary.h"
 
 #include <mutex>
 #include <string>
@@ -32,8 +31,8 @@ struct ModuleResolver;
 struct ParseResult;
 struct HotComment;
 struct BuildQueueItem;
+struct BuildQueueWorkState;
 struct FrontendCancellationToken;
-struct AnyTypeSummary;
 
 struct LoadDefinitionFileResult
 {
@@ -251,6 +250,9 @@ private:
     void checkBuildQueueItem(BuildQueueItem& item);
     void checkBuildQueueItems(std::vector<BuildQueueItem>& items);
     void recordItemResult(const BuildQueueItem& item);
+    void performQueueItemTask(std::shared_ptr<BuildQueueWorkState> state, size_t itemPos);
+    void sendQueueItemTask(std::shared_ptr<BuildQueueWorkState> state, size_t itemPos);
+    void sendQueueCycleItemTask(std::shared_ptr<BuildQueueWorkState> state);
 
     static LintResult classifyLints(const std::vector<LintWarning>& warnings, const Config& config);
 
@@ -296,6 +298,7 @@ ModulePtr check(
     NotNull<ModuleResolver> moduleResolver,
     NotNull<FileResolver> fileResolver,
     const ScopePtr& globalScope,
+    const ScopePtr& typeFunctionScope,
     std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope,
     FrontendOptions options,
     TypeCheckLimits limits
@@ -310,6 +313,7 @@ ModulePtr check(
     NotNull<ModuleResolver> moduleResolver,
     NotNull<FileResolver> fileResolver,
     const ScopePtr& globalScope,
+    const ScopePtr& typeFunctionScope,
     std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope,
     FrontendOptions options,
     TypeCheckLimits limits,

@@ -216,11 +216,13 @@ struct TypeFunctionClassType
 
     std::optional<TypeFunctionTypeId> metatable; // metaclass?
 
-    std::optional<TypeFunctionTypeId> parent;
+    // this was mistaken, and we should actually be keeping separate read/write types here.
+    std::optional<TypeFunctionTypeId> parent_DEPRECATED;
+
+    std::optional<TypeFunctionTypeId> readParent;
+    std::optional<TypeFunctionTypeId> writeParent;
 
     TypeId classTy;
-
-    std::string name_DEPRECATED;
 };
 
 struct TypeFunctionGenericType

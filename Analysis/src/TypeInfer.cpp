@@ -32,9 +32,10 @@ LUAU_FASTINTVARIABLE(LuauVisitRecursionLimit, 500)
 LUAU_FASTFLAG(LuauKnowsTheDataModel3)
 LUAU_FASTFLAGVARIABLE(DebugLuauFreezeDuringUnification)
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
-LUAU_FASTFLAGVARIABLE(LuauOldSolverCreatesChildScopePointers)
 LUAU_FASTFLAG(LuauPreserveUnionIntersectionNodeForLeadingTokenSingleType)
 LUAU_FASTFLAG(LuauFreeTypesMustHaveBounds)
+LUAU_FASTFLAG(LuauRetainDefinitionAliasLocations)
+LUAU_FASTFLAGVARIABLE(LuauStatForInFix)
 
 namespace Luau
 {
@@ -255,6 +256,7 @@ ModulePtr TypeChecker::checkWithoutRecursionCheck(const SourceModule& module, Mo
     currentModule->type = module.type;
     currentModule->allocator = module.allocator;
     currentModule->names = module.names;
+    currentModule->root = module.root;
 
     iceHandler->moduleName = module.name;
     normalizer.arena = &currentModule->internalTypes;
@@ -1316,8 +1318,24 @@ ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStatForIn& forin)
             // Extract the remaining return values of the call
             // and check them against the parameter types of the iterator function.
             auto [types, tail] = flatten(callRetPack);
-            std::vector<TypeId> argTypes = std::vector<TypeId>(types.begin() + 1, types.end());
-            argPack = addTypePack(TypePackVar{TypePack{std::move(argTypes), tail}});
+
+            if (FFlag::LuauStatForInFix)
+            {
+                if (!types.empty())
+                {
+                    std::vector<TypeId> argTypes = std::vector<TypeId>(types.begin() + 1, types.end());
+                    argPack = addTypePack(TypePackVar{TypePack{std::move(argTypes), tail}});
+                }
+                else
+                {
+                    argPack = addTypePack(TypePack{});
+                }
+            }
+            else
+            {
+                std::vector<TypeId> argTypes = std::vector<TypeId>(types.begin() + 1, types.end());
+                argPack = addTypePack(TypePackVar{TypePack{std::move(argTypes), tail}});
+            }
         }
         else
         {
@@ -1655,7 +1673,10 @@ void TypeChecker::prototype(const ScopePtr& scope, const AstStatTypeAlias& typea
             FreeType* ftv = getMutable<FreeType>(ty);
             LUAU_ASSERT(ftv);
             ftv->forwardedTypeAlias = true;
-            bindingsMap[name] = {std::move(generics), std::move(genericPacks), ty};
+            if (FFlag::LuauRetainDefinitionAliasLocations)
+                bindingsMap[name] = {std::move(generics), std::move(genericPacks), ty, typealias.location};
+            else
+                bindingsMap[name] = {std::move(generics), std::move(genericPacks), ty};
 
             scope->typeAliasLocations[name] = typealias.location;
             scope->typeAliasNameLocations[name] = typealias.nameLocation;
@@ -1700,7 +1721,10 @@ void TypeChecker::prototype(const ScopePtr& scope, const AstStatDeclareClass& de
     TypeId metaTy = addType(TableType{TableState::Sealed, scope->level});
 
     ctv->metatable = metaTy;
-    scope->exportedTypeBindings[className] = TypeFun{{}, classTy};
+    if (FFlag::LuauRetainDefinitionAliasLocations)
+        scope->exportedTypeBindings[className] = TypeFun{{}, classTy, declaredClass.location};
+    else
+        scope->exportedTypeBindings[className] = TypeFun{{}, classTy};
 }
 
 ControlFlow TypeChecker::check(const ScopePtr& scope, const AstStatDeclareClass& declaredClass)
@@ -5212,12 +5236,9 @@ LUAU_NOINLINE void TypeChecker::reportErrorCodeTooComplex(const Location& locati
 ScopePtr TypeChecker::childFunctionScope(const ScopePtr& parent, const Location& location, int subLevel)
 {
     ScopePtr scope = std::make_shared<Scope>(parent, subLevel);
-    if (FFlag::LuauOldSolverCreatesChildScopePointers)
-    {
-        scope->location = location;
-        scope->returnType = parent->returnType;
-        parent->children.emplace_back(scope.get());
-    }
+    scope->location = location;
+    scope->returnType = parent->returnType;
+    parent->children.emplace_back(scope.get());
 
     currentModule->scopes.push_back(std::make_pair(location, scope));
     return scope;
@@ -5229,12 +5250,9 @@ ScopePtr TypeChecker::childScope(const ScopePtr& parent, const Location& locatio
     ScopePtr scope = std::make_shared<Scope>(parent);
     scope->level = parent->level;
     scope->varargPack = parent->varargPack;
-    if (FFlag::LuauOldSolverCreatesChildScopePointers)
-    {
-        scope->location = location;
-        scope->returnType = parent->returnType;
-        parent->children.emplace_back(scope.get());
-    }
+    scope->location = location;
+    scope->returnType = parent->returnType;
+    parent->children.emplace_back(scope.get());
 
     currentModule->scopes.push_back(std::make_pair(location, scope));
     return scope;
@@ -5723,6 +5741,10 @@ TypeId TypeChecker::resolveTypeWorker(const ScopePtr& scope, const AstType& anno
     {
         TypeId ty = checkExpr(scope, *typeOf->expr).type;
         return ty;
+    }
+    else if (annotation.is<AstTypeOptional>())
+    {
+        return builtinTypes->nilType;
     }
     else if (const auto& un = annotation.as<AstTypeUnion>())
     {

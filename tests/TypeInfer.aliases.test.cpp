@@ -11,6 +11,10 @@ using namespace Luau;
 
 LUAU_FASTFLAG(LuauSolverV2)
 LUAU_FASTFLAG(LuauFixInfiniteRecursionInNormalization)
+LUAU_FASTFLAG(LuauImproveTypePathsInErrors)
+LUAU_FASTFLAG(LuauBidirectionalInferenceUpcast)
+LUAU_FASTFLAG(LuauBidirectionalInferenceCollectIndexerTypes)
+LUAU_FASTFLAG(LuauRetainDefinitionAliasLocations)
 
 TEST_SUITE_BEGIN("TypeAliases");
 
@@ -216,7 +220,11 @@ TEST_CASE_FIXTURE(Fixture, "generic_aliases")
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    const std::string expected = R"(Type '{ v: string }' could not be converted into 'T<number>'; at [read "v"], string is not exactly number)";
+    const std::string expected = (FFlag::LuauImproveTypePathsInErrors)
+                                     ? "Type '{ v: string }' could not be converted into 'T<number>'; \n"
+                                       "this is because accessing `v` results in `string` in the former type and `number` in the latter type, and "
+                                       "`string` is not exactly `number`"
+                                     : R"(Type '{ v: string }' could not be converted into 'T<number>'; at [read "v"], string is not exactly number)";
     CHECK(result.errors[0].location == Location{{4, 31}, {4, 44}});
     CHECK_EQ(expected, toString(result.errors[0]));
 }
@@ -236,7 +244,11 @@ TEST_CASE_FIXTURE(Fixture, "dependent_generic_aliases")
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
     const std::string expected =
-        R"(Type '{ t: { v: string } }' could not be converted into 'U<number>'; at [read "t"][read "v"], string is not exactly number)";
+        (FFlag::LuauImproveTypePathsInErrors)
+            ? "Type '{ t: { v: string } }' could not be converted into 'U<number>'; \n"
+              "this is because accessing `t.v` results in `string` in the former type and `number` in the latter type, and `string` is not exactly "
+              "`number`"
+            : R"(Type '{ t: { v: string } }' could not be converted into 'U<number>'; at [read "t"][read "v"], string is not exactly number)";
 
     CHECK(result.errors[0].location == Location{{4, 31}, {4, 52}});
     CHECK_EQ(expected, toString(result.errors[0]));
@@ -244,8 +256,10 @@ TEST_CASE_FIXTURE(Fixture, "dependent_generic_aliases")
 
 TEST_CASE_FIXTURE(Fixture, "mutually_recursive_generic_aliases")
 {
-    // CLI-116108
-    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+    ScopedFastFlag sffs[] = {
+        {FFlag::LuauBidirectionalInferenceUpcast, true},
+        {FFlag::LuauBidirectionalInferenceCollectIndexerTypes, true},
+    };
 
     CheckResult result = check(R"(
         --!strict
@@ -1207,6 +1221,42 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "gh1632_no_infinite_recursion_in_normalizatio
     )");
 
     LUAU_CHECK_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "exported_alias_location_is_accessible_on_module")
+{
+    ScopedFastFlag sff{FFlag::LuauRetainDefinitionAliasLocations, true};
+
+    CheckResult result = check(R"(
+        export type Value = string
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    auto module = getMainModule();
+    auto tfun = module->exportedTypeBindings.find("Value");
+    REQUIRE(tfun != module->exportedTypeBindings.end());
+    CHECK_EQ(tfun->second.definitionLocation, Location{{1, 8}, {1, 34}});
+}
+
+TEST_CASE_FIXTURE(Fixture, "exported_type_function_location_is_accessible_on_module")
+{
+    ScopedFastFlag flags[] = {
+        {FFlag::LuauSolverV2, true},
+        {FFlag::LuauRetainDefinitionAliasLocations, true},
+    };
+
+    CheckResult result = check(R"(
+        export type function Apply()
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    auto module = getMainModule();
+    auto tfun = module->exportedTypeBindings.find("Apply");
+    REQUIRE(tfun != module->exportedTypeBindings.end());
+    CHECK_EQ(tfun->second.definitionLocation, Location{{1, 8}, {2, 11}});
 }
 
 TEST_SUITE_END();

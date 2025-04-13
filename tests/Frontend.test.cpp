@@ -14,10 +14,10 @@
 using namespace Luau;
 
 LUAU_FASTFLAG(LuauSolverV2);
-LUAU_FASTFLAG(DebugLuauFreezeArena);
-LUAU_FASTFLAG(DebugLuauMagicTypes);
+LUAU_FASTFLAG(DebugLuauFreezeArena)
+LUAU_FASTFLAG(DebugLuauMagicTypes)
 LUAU_FASTFLAG(LuauSelectivelyRetainDFGArena)
-LUAU_FASTFLAG(LuauBetterReverseDependencyTracking);
+LUAU_FASTFLAG(LuauImproveTypePathsInErrors)
 
 namespace
 {
@@ -920,7 +920,17 @@ TEST_CASE_FIXTURE(FrontendFixture, "it_should_be_safe_to_stringify_errors_when_f
     // When this test fails, it is because the TypeIds needed by the error have been deallocated.
     // It is thus basically impossible to predict what will happen when this assert is evaluated.
     // It could segfault, or you could see weird type names like the empty string or <VALUELESS BY EXCEPTION>
-    if (FFlag::LuauSolverV2)
+    if (FFlag::LuauSolverV2 && FFlag::LuauImproveTypePathsInErrors)
+    {
+        REQUIRE_EQ(
+            "Type\n\t"
+            "'{ count: string }'"
+            "\ncould not be converted into\n\t"
+            "'{ Count: number }'",
+            toString(result.errors[0])
+        );
+    }
+    else if (FFlag::LuauSolverV2)
         REQUIRE_EQ(
             R"(Type
     '{ count: string }'
@@ -1542,6 +1552,22 @@ TEST_CASE_FIXTURE(FrontendFixture, "check_module_references_allocator")
     CHECK_EQ(module->names.get(), source->names.get());
 }
 
+TEST_CASE_FIXTURE(FrontendFixture, "check_module_references_correct_ast_root")
+{
+    fileResolver.source["game/workspace/MyScript"] = R"(
+        print("Hello World")
+    )";
+
+    frontend.check("game/workspace/MyScript");
+
+    ModulePtr module = frontend.moduleResolver.getModule("game/workspace/MyScript");
+    SourceModule* source = frontend.getSourceModule("game/workspace/MyScript");
+    CHECK(module);
+    CHECK(source);
+
+    CHECK_EQ(module->root, source->root);
+}
+
 TEST_CASE_FIXTURE(FrontendFixture, "dfg_data_cleared_on_retain_type_graphs_unset")
 {
     ScopedFastFlag sffs[] = {{FFlag::LuauSolverV2, true}, {FFlag::LuauSelectivelyRetainDFGArena, true}};
@@ -1571,8 +1597,6 @@ return {x = a, y = b, z = c}
 
 TEST_CASE_FIXTURE(FrontendFixture, "test_traverse_dependents")
 {
-    ScopedFastFlag dependencyTracking{FFlag::LuauBetterReverseDependencyTracking, true};
-
     fileResolver.source["game/Gui/Modules/A"] = "return {hello=5, world=true}";
     fileResolver.source["game/Gui/Modules/B"] = R"(
         return require(game:GetService('Gui').Modules.A)
@@ -1605,8 +1629,6 @@ TEST_CASE_FIXTURE(FrontendFixture, "test_traverse_dependents")
 
 TEST_CASE_FIXTURE(FrontendFixture, "test_traverse_dependents_early_exit")
 {
-    ScopedFastFlag dependencyTracking{FFlag::LuauBetterReverseDependencyTracking, true};
-
     fileResolver.source["game/Gui/Modules/A"] = "return {hello=5, world=true}";
     fileResolver.source["game/Gui/Modules/B"] = R"(
         return require(game:GetService('Gui').Modules.A)
@@ -1634,8 +1656,6 @@ TEST_CASE_FIXTURE(FrontendFixture, "test_traverse_dependents_early_exit")
 
 TEST_CASE_FIXTURE(FrontendFixture, "test_dependents_stored_on_node_as_graph_updates")
 {
-    ScopedFastFlag dependencyTracking{FFlag::LuauBetterReverseDependencyTracking, true};
-
     auto updateSource = [&](const std::string& name, const std::string& source)
     {
         fileResolver.source[name] = source;
@@ -1750,7 +1770,6 @@ TEST_CASE_FIXTURE(FrontendFixture, "test_dependents_stored_on_node_as_graph_upda
 
 TEST_CASE_FIXTURE(FrontendFixture, "test_invalid_dependency_tracking_per_module_resolver")
 {
-    ScopedFastFlag dependencyTracking{FFlag::LuauBetterReverseDependencyTracking, true};
     ScopedFastFlag newSolver{FFlag::LuauSolverV2, false};
 
     fileResolver.source["game/Gui/Modules/A"] = "return {hello=5, world=true}";
@@ -1770,6 +1789,98 @@ TEST_CASE_FIXTURE(FrontendFixture, "test_invalid_dependency_tracking_per_module_
     CHECK(frontend.allModuleDependenciesValid("game/Gui/Modules/B", !opts.forAutocomplete));
     CHECK(frontend.allModuleDependenciesValid("game/Gui/Modules/A", !opts.forAutocomplete));
     CHECK(frontend.allModuleDependenciesValid("game/Gui/Modules/A", opts.forAutocomplete));
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "queue_check_simple")
+{
+    fileResolver.source["game/Gui/Modules/A"] = R"(
+        --!strict
+        return {hello=5, world=true}
+    )";
+    fileResolver.source["game/Gui/Modules/B"] = R"(
+        --!strict
+        local Modules = game:GetService('Gui').Modules
+        local A = require(Modules.A)
+        return {b_value = A.hello}
+    )";
+
+    frontend.queueModuleCheck("game/Gui/Modules/B");
+    frontend.checkQueuedModules();
+
+    auto result = frontend.getCheckResult("game/Gui/Modules/B", true);
+    REQUIRE(result);
+    LUAU_REQUIRE_NO_ERRORS(*result);
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "queue_check_cycle_instant")
+{
+    fileResolver.source["game/Gui/Modules/A"] = R"(
+        --!strict
+        local Modules = game:GetService('Gui').Modules
+        local B = require(Modules.B)
+        return {a_value = B.hello}
+    )";
+    fileResolver.source["game/Gui/Modules/B"] = R"(
+        --!strict
+        local Modules = game:GetService('Gui').Modules
+        local A = require(Modules.A)
+        return {b_value = A.hello}
+    )";
+
+    frontend.queueModuleCheck("game/Gui/Modules/B");
+    frontend.checkQueuedModules();
+
+    auto result = frontend.getCheckResult("game/Gui/Modules/B", true);
+    REQUIRE(result);
+    LUAU_REQUIRE_ERROR_COUNT(2, *result);
+    CHECK(toString(result->errors[0]) == "Cyclic module dependency: game/Gui/Modules/B -> game/Gui/Modules/A");
+    CHECK(toString(result->errors[1]) == "Cyclic module dependency: game/Gui/Modules/A -> game/Gui/Modules/B");
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "queue_check_cycle_delayed")
+{
+    fileResolver.source["game/Gui/Modules/C"] = R"(
+        --!strict
+        return {c_value = 5}
+    )";
+    fileResolver.source["game/Gui/Modules/A"] = R"(
+        --!strict
+        local Modules = game:GetService('Gui').Modules
+        local C = require(Modules.C)
+        local B = require(Modules.B)
+        return {a_value = B.hello + C.c_value}
+    )";
+    fileResolver.source["game/Gui/Modules/B"] = R"(
+        --!strict
+        local Modules = game:GetService('Gui').Modules
+        local C = require(Modules.C)
+        local A = require(Modules.A)
+        return {b_value = A.hello + C.c_value}
+    )";
+
+    frontend.queueModuleCheck("game/Gui/Modules/B");
+    frontend.checkQueuedModules();
+
+    auto result = frontend.getCheckResult("game/Gui/Modules/B", true);
+    REQUIRE(result);
+    LUAU_REQUIRE_ERROR_COUNT(2, *result);
+    CHECK(toString(result->errors[0]) == "Cyclic module dependency: game/Gui/Modules/B -> game/Gui/Modules/A");
+    CHECK(toString(result->errors[1]) == "Cyclic module dependency: game/Gui/Modules/A -> game/Gui/Modules/B");
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "queue_check_propagates_ice")
+{
+    ScopedFastFlag sffs{FFlag::DebugLuauMagicTypes, true};
+
+    ModuleName mm = fromString("MainModule");
+    fileResolver.source[mm] = R"(
+        --!strict
+        local a: _luau_ice = 55
+    )";
+    frontend.markDirty(mm);
+    frontend.queueModuleCheck("MainModule");
+
+    CHECK_THROWS_AS(frontend.checkQueuedModules(), InternalCompilerError);
 }
 
 TEST_SUITE_END();

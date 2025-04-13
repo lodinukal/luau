@@ -18,6 +18,9 @@
 #include <optional>
 
 LUAU_FASTINT(LuauTypeInferRecursionLimit)
+LUAU_FASTFLAGVARIABLE(LuauUnifyMetatableWithAny)
+LUAU_FASTFLAG(LuauExtraFollows)
+LUAU_FASTFLAG(LuauNonReentrantGeneralization)
 
 namespace Luau
 {
@@ -235,6 +238,10 @@ bool Unifier2::unify(TypeId subTy, TypeId superTy)
     auto superMetatable = get<MetatableType>(superTy);
     if (subMetatable && superMetatable)
         return unify(subMetatable, superMetatable);
+    else if (FFlag::LuauUnifyMetatableWithAny && subMetatable && superAny)
+        return unify(subMetatable, superAny);
+    else if (FFlag::LuauUnifyMetatableWithAny && subAny && superMetatable)
+        return unify(subAny, superMetatable);
     else if (subMetatable) // if we only have one metatable, unify with the inner table
         return unify(subMetatable->table, superTy);
     else if (superMetatable) // if we only have one metatable, unify with the inner table
@@ -277,7 +284,7 @@ bool Unifier2::unifyFreeWithType(TypeId subTy, TypeId superTy)
     if (superArgTail)
         return doDefault();
 
-    const IntersectionType* upperBoundIntersection = get<IntersectionType>(subFree->upperBound);
+    const IntersectionType* upperBoundIntersection = get<IntersectionType>(FFlag::LuauExtraFollows ? upperBound : subFree->upperBound);
     if (!upperBoundIntersection)
         return doDefault();
 
@@ -315,10 +322,23 @@ bool Unifier2::unify(TypeId subTy, const FunctionType* superFn)
     if (shouldInstantiate)
     {
         for (auto generic : subFn->generics)
-            genericSubstitutions[generic] = freshType(arena, builtinTypes, scope);
+        {
+            const GenericType* gen = get<GenericType>(generic);
+            LUAU_ASSERT(gen);
+            genericSubstitutions[generic] = freshType(scope, gen->polarity);
+        }
 
         for (auto genericPack : subFn->genericPacks)
-            genericPackSubstitutions[genericPack] = arena->freshTypePack(scope);
+        {
+            if (FFlag::LuauNonReentrantGeneralization)
+            {
+                const GenericTypePack* gen = get<GenericTypePack>(genericPack);
+                LUAU_ASSERT(gen);
+                genericPackSubstitutions[genericPack] = freshTypePack(scope, gen->polarity);
+            }
+            else
+                genericPackSubstitutions[genericPack] = arena->freshTypePack(scope);
+        }
     }
 
     bool argResult = unify(superFn->argTypes, subFn->argTypes);
@@ -427,9 +447,6 @@ bool Unifier2::unify(TableType* subTable, const TableType* superTable)
         superTypePackParamsIter++;
     }
 
-    if (subTable->selfTy && superTable->selfTy)
-        result &= unify(*subTable->selfTy, *superTable->selfTy);
-
     if (subTable->indexer && superTable->indexer)
     {
         result &= unify(subTable->indexer->indexType, superTable->indexer->indexType);
@@ -522,6 +539,16 @@ bool Unifier2::unify(const TableType* subTable, const AnyType* superAny)
     }
 
     return true;
+}
+
+bool Unifier2::unify(const MetatableType* subMetatable, const AnyType*)
+{
+    return unify(subMetatable->metatable, builtinTypes->anyType) && unify(subMetatable->table, builtinTypes->anyType);
+}
+
+bool Unifier2::unify(const AnyType*, const MetatableType* superMetatable)
+{
+    return unify(builtinTypes->anyType, superMetatable->metatable) && unify(builtinTypes->anyType, superMetatable->table);
 }
 
 // FIXME?  This should probably return an ErrorVec or an optional<TypeError>
@@ -634,38 +661,33 @@ struct FreeTypeSearcher : TypeVisitor
     {
     }
 
-    enum Polarity
-    {
-        Positive,
-        Negative,
-        Both,
-    };
-
-    Polarity polarity = Positive;
+    Polarity polarity = Polarity::Positive;
 
     void flip()
     {
         switch (polarity)
         {
-        case Positive:
-            polarity = Negative;
+        case Polarity::Positive:
+            polarity = Polarity::Negative;
             break;
-        case Negative:
-            polarity = Positive;
+        case Polarity::Negative:
+            polarity = Polarity::Positive;
             break;
-        case Both:
+        case Polarity::Mixed:
             break;
+        default:
+            LUAU_ASSERT(!"Unreachable");
         }
     }
 
     DenseHashSet<const void*> seenPositive{nullptr};
     DenseHashSet<const void*> seenNegative{nullptr};
 
-    bool seenWithPolarity(const void* ty)
+    bool seenWithCurrentPolarity(const void* ty)
     {
         switch (polarity)
         {
-        case Positive:
+        case Polarity::Positive:
         {
             if (seenPositive.contains(ty))
                 return true;
@@ -673,7 +695,7 @@ struct FreeTypeSearcher : TypeVisitor
             seenPositive.insert(ty);
             return false;
         }
-        case Negative:
+        case Polarity::Negative:
         {
             if (seenNegative.contains(ty))
                 return true;
@@ -681,7 +703,7 @@ struct FreeTypeSearcher : TypeVisitor
             seenNegative.insert(ty);
             return false;
         }
-        case Both:
+        case Polarity::Mixed:
         {
             if (seenPositive.contains(ty) && seenNegative.contains(ty))
                 return true;
@@ -690,6 +712,8 @@ struct FreeTypeSearcher : TypeVisitor
             seenNegative.insert(ty);
             return false;
         }
+        default:
+            LUAU_ASSERT(!"Unreachable");
         }
 
         return false;
@@ -703,7 +727,7 @@ struct FreeTypeSearcher : TypeVisitor
 
     bool visit(TypeId ty) override
     {
-        if (seenWithPolarity(ty))
+        if (seenWithCurrentPolarity(ty))
             return false;
 
         LUAU_ASSERT(ty);
@@ -712,7 +736,7 @@ struct FreeTypeSearcher : TypeVisitor
 
     bool visit(TypeId ty, const FreeType& ft) override
     {
-        if (seenWithPolarity(ty))
+        if (seenWithCurrentPolarity(ty))
             return false;
 
         if (!subsumes(scope, ft.scope))
@@ -720,16 +744,18 @@ struct FreeTypeSearcher : TypeVisitor
 
         switch (polarity)
         {
-        case Positive:
+        case Polarity::Positive:
             positiveTypes[ty]++;
             break;
-        case Negative:
+        case Polarity::Negative:
             negativeTypes[ty]++;
             break;
-        case Both:
+        case Polarity::Mixed:
             positiveTypes[ty]++;
             negativeTypes[ty]++;
             break;
+        default:
+            LUAU_ASSERT(!"Unreachable");
         }
 
         return true;
@@ -737,23 +763,25 @@ struct FreeTypeSearcher : TypeVisitor
 
     bool visit(TypeId ty, const TableType& tt) override
     {
-        if (seenWithPolarity(ty))
+        if (seenWithCurrentPolarity(ty))
             return false;
 
         if ((tt.state == TableState::Free || tt.state == TableState::Unsealed) && subsumes(scope, tt.scope))
         {
             switch (polarity)
             {
-            case Positive:
+            case Polarity::Positive:
                 positiveTypes[ty]++;
                 break;
-            case Negative:
+            case Polarity::Negative:
                 negativeTypes[ty]++;
                 break;
-            case Both:
+            case Polarity::Mixed:
                 positiveTypes[ty]++;
                 negativeTypes[ty]++;
                 break;
+            default:
+                LUAU_ASSERT(!"Unreachable");
             }
         }
 
@@ -766,7 +794,7 @@ struct FreeTypeSearcher : TypeVisitor
                 LUAU_ASSERT(prop.isShared());
 
                 Polarity p = polarity;
-                polarity = Both;
+                polarity = Polarity::Mixed;
                 traverse(prop.type());
                 polarity = p;
             }
@@ -783,7 +811,7 @@ struct FreeTypeSearcher : TypeVisitor
 
     bool visit(TypeId ty, const FunctionType& ft) override
     {
-        if (seenWithPolarity(ty))
+        if (seenWithCurrentPolarity(ty))
             return false;
 
         flip();
@@ -802,7 +830,7 @@ struct FreeTypeSearcher : TypeVisitor
 
     bool visit(TypePackId tp, const FreeTypePack& ftp) override
     {
-        if (seenWithPolarity(tp))
+        if (seenWithCurrentPolarity(tp))
             return false;
 
         if (!subsumes(scope, ftp.scope))
@@ -810,16 +838,18 @@ struct FreeTypeSearcher : TypeVisitor
 
         switch (polarity)
         {
-        case Positive:
+        case Polarity::Positive:
             positiveTypes[tp]++;
             break;
-        case Negative:
+        case Polarity::Negative:
             negativeTypes[tp]++;
             break;
-        case Both:
+        case Polarity::Mixed:
             positiveTypes[tp]++;
             negativeTypes[tp]++;
             break;
+        default:
+            LUAU_ASSERT(!"Unreachable");
         }
 
         return true;
@@ -923,6 +953,25 @@ OccursCheckResult Unifier2::occursCheck(DenseHashSet<TypePackId>& seen, TypePack
     }
 
     return OccursCheckResult::Pass;
+}
+
+TypeId Unifier2::freshType(NotNull<Scope> scope, Polarity polarity)
+{
+    TypeId result = ::Luau::freshType(arena, builtinTypes, scope.get(), polarity);
+    newFreshTypes.emplace_back(result);
+    return result;
+}
+
+TypePackId Unifier2::freshTypePack(NotNull<Scope> scope, Polarity polarity)
+{
+    TypePackId result = arena->freshTypePack(scope.get());
+
+    auto ftp = getMutable<FreeTypePack>(result);
+    LUAU_ASSERT(ftp);
+    ftp->polarity = polarity;
+
+    newFreshTypePacks.emplace_back(result);
+    return result;
 }
 
 } // namespace Luau

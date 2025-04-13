@@ -13,11 +13,8 @@
 #include <set>
 #include <vector>
 
-LUAU_FASTFLAGVARIABLE(LuauTypeFunFixHydratedClasses)
 LUAU_DYNAMIC_FASTINT(LuauTypeFunctionSerdeIterationLimit)
-LUAU_FASTFLAGVARIABLE(LuauTypeFunSingletonEquality)
-LUAU_FASTFLAGVARIABLE(LuauUserTypeFunTypeofReturnsType)
-LUAU_FASTFLAGVARIABLE(LuauTypeFunPrintFix)
+LUAU_FASTFLAGVARIABLE(LuauTypeFunReadWriteParents)
 
 namespace Luau
 {
@@ -1110,7 +1107,7 @@ static int getFunctionGenerics(lua_State* L)
 
 // Luau: `self:parent() -> type`
 // Returns the parent of a class type
-static int getClassParent(lua_State* L)
+static int getClassParent_DEPRECATED(lua_State* L)
 {
     int argumentCount = lua_gettop(L);
     if (argumentCount != 1)
@@ -1122,10 +1119,54 @@ static int getClassParent(lua_State* L)
         luaL_error(L, "type.parent: expected self to be a class, but got %s instead", getTag(L, self).c_str());
 
     // If the parent does not exist, we should return nil
-    if (!tfct->parent)
+    if (!tfct->parent_DEPRECATED)
         lua_pushnil(L);
     else
-        allocTypeUserData(L, (*tfct->parent)->type);
+        allocTypeUserData(L, (*tfct->parent_DEPRECATED)->type);
+
+    return 1;
+}
+
+// Luau: `self:readparent() -> type`
+// Returns the read type of the class' parent
+static int getReadParent(lua_State* L)
+{
+    int argumentCount = lua_gettop(L);
+    if (argumentCount != 1)
+        luaL_error(L, "type.parent: expected 1 arguments, but got %d", argumentCount);
+
+    TypeFunctionTypeId self = getTypeUserData(L, 1);
+    auto tfct = get<TypeFunctionClassType>(self);
+    if (!tfct)
+        luaL_error(L, "type.parent: expected self to be a class, but got %s instead", getTag(L, self).c_str());
+
+    // If the parent does not exist, we should return nil
+    if (!tfct->readParent)
+        lua_pushnil(L);
+    else
+        allocTypeUserData(L, (*tfct->readParent)->type);
+
+    return 1;
+}
+//
+// Luau: `self:writeparent() -> type`
+// Returns the write type of the class' parent
+static int getWriteParent(lua_State* L)
+{
+    int argumentCount = lua_gettop(L);
+    if (argumentCount != 1)
+        luaL_error(L, "type.parent: expected 1 arguments, but got %d", argumentCount);
+
+    TypeFunctionTypeId self = getTypeUserData(L, 1);
+    auto tfct = get<TypeFunctionClassType>(self);
+    if (!tfct)
+        luaL_error(L, "type.parent: expected self to be a class, but got %s instead", getTag(L, self).c_str());
+
+    // If the parent does not exist, we should return nil
+    if (!tfct->writeParent)
+        lua_pushnil(L);
+    else
+        allocTypeUserData(L, (*tfct->writeParent)->type);
 
     return 1;
 }
@@ -1553,7 +1594,7 @@ void registerTypeUserData(lua_State* L)
         {"components", getComponents},
 
         // Class type methods
-        {"parent", getClassParent},
+        {FFlag::LuauTypeFunReadWriteParents ? "readparent" : "parent", FFlag::LuauTypeFunReadWriteParents ? getReadParent : getClassParent_DEPRECATED},
 
         // Function type methods (cont.)
         {"setgenerics", setFunctionGenerics},
@@ -1563,17 +1604,17 @@ void registerTypeUserData(lua_State* L)
         {"name", getGenericName},
         {"ispack", getGenericIsPack},
 
+        // move this under Class type methods when removing FFlagLuauTypeFunReadWriteParents
+        {FFlag::LuauTypeFunReadWriteParents ? "writeparent" : nullptr, FFlag::LuauTypeFunReadWriteParents ? getWriteParent : nullptr},
+
         {nullptr, nullptr}
     };
 
     // Create and register metatable for type userdata
     luaL_newmetatable(L, "type");
 
-    if (FFlag::LuauUserTypeFunTypeofReturnsType)
-    {
-        lua_pushstring(L, "type");
-        lua_setfield(L, -2, "__type");
-    }
+    lua_pushstring(L, "type");
+    lua_setfield(L, -2, "__type");
 
     // Protect metatable from being changed
     lua_pushstring(L, "The metatable is locked");
@@ -1614,10 +1655,7 @@ static int print(lua_State* L)
         const char* s = luaL_tolstring(L, i, &l); // convert to string using __tostring et al
         if (i > 1)
         {
-            if (FFlag::LuauTypeFunPrintFix)
-                result.append(1, '\t');
-            else
-                result.append('\t', 1);
+            result.append(1, '\t');
         }
         result.append(s, l);
         lua_pop(L, 1);
@@ -1710,14 +1748,14 @@ bool areEqual(SeenSet& seen, const TypeFunctionSingletonType& lhs, const TypeFun
 
     {
         const TypeFunctionBooleanSingleton* lp = get<TypeFunctionBooleanSingleton>(&lhs);
-        const TypeFunctionBooleanSingleton* rp = get<TypeFunctionBooleanSingleton>(FFlag::LuauTypeFunSingletonEquality ? &rhs : &lhs);
+        const TypeFunctionBooleanSingleton* rp = get<TypeFunctionBooleanSingleton>(&rhs);
         if (lp && rp)
             return lp->value == rp->value;
     }
 
     {
         const TypeFunctionStringSingleton* lp = get<TypeFunctionStringSingleton>(&lhs);
-        const TypeFunctionStringSingleton* rp = get<TypeFunctionStringSingleton>(FFlag::LuauTypeFunSingletonEquality ? &rhs : &lhs);
+        const TypeFunctionStringSingleton* rp = get<TypeFunctionStringSingleton>(&rhs);
         if (lp && rp)
             return lp->value == rp->value;
     }
@@ -1870,10 +1908,7 @@ bool areEqual(SeenSet& seen, const TypeFunctionClassType& lhs, const TypeFunctio
     if (seenSetContains(seen, &lhs, &rhs))
         return true;
 
-    if (FFlag::LuauTypeFunFixHydratedClasses)
-        return lhs.classTy == rhs.classTy;
-    else
-        return lhs.name_DEPRECATED == rhs.name_DEPRECATED;
+    return lhs.classTy == rhs.classTy;
 }
 
 bool areEqual(SeenSet& seen, const TypeFunctionType& lhs, const TypeFunctionType& rhs)
