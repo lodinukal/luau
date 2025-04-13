@@ -247,21 +247,20 @@ fn makeCdb(step: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
 
             var arguments = std.ArrayList([]const u8).init(allocator);
             // pretend this is clang compiling
-            arguments.appendSlice(&.{ "clang", c_file, "-o", output_str }) catch @panic("OOM");
+            arguments.appendSlice(&.{ "zig cc", c_file, "-o", output_str }) catch @panic("OOM");
             arguments.appendSlice(flags) catch @panic("OOM");
 
             // add host native include dirs and libs
             // (doesn't really help unless your include dirs change after generating this)
-            // {
-            //     var native_paths = try std.zig.system.NativePaths.detect(allocator, step.owner.host);
-            //     defer native_paths.deinit();
-            //     // native_paths also has lib_dirs. probably not relevant to clangd and compile_commands.json
-            //     for (native_paths.include_dirs.items) |include_dir| {
-            //         try arguments.append(try common.includeFlag(allocator, include_dir));
-            //     }
-            // }
+            {
+                const native_paths = try std.zig.system.NativePaths.detect(allocator, @import("builtin").target);
+                // native_paths also has lib_dirs. probably not relevant to clangd and compile_commands.json
+                for (native_paths.include_dirs.items) |include_dir| {
+                    try arguments.append(includeFlag(allocator, include_dir));
+                }
+            }
 
-            const entry = CompileCommandEntry{
+            const entry: CompileCommandEntry = .{
                 .arguments = arguments.toOwnedSlice() catch @panic("OOM"),
                 .output = output_str,
                 .file = c_file,

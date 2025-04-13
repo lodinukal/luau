@@ -149,6 +149,10 @@ FValue<T>* FValue<T>::list = nullptr;
 #define LUAU_PRINTF_ATTR(fmt, arg)
 #endif
 
+#ifdef LUAU_HAS_PRELUDE
+#include "luau_prelude.h"
+#endif
+
 #ifndef LUAU_EXTERNAL_TRY_CATCH
 #define LUAU_TRY_CATCH(trying, catching) \
     try \

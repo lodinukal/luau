@@ -26,19 +26,23 @@ pub const config = struct {
     /// maximum number of captures supported by pattern matching
     pub const max_captures: isize = 32;
     /// vector size for the VM
-    pub const vector_size: usize = 3;
+    pub const vector_size: usize = raw.LUA_VECTOR_SIZE;
 
     pub const extra_size = vector_size - 2;
 };
 
 pub const Index = enum(i32) {
     multiret = -1,
+    none = 0,
 
     registry = -config.max_cstack - 2000,
     environ = -config.max_cstack - 2001,
     globals = -config.max_cstack - 2002,
 
+    _,
+
     pub fn at(i: i32) Index {
+        std.debug.assert(i != 0);
         return @enumFromInt(i);
     }
 
@@ -69,8 +73,8 @@ pub const CoroutineStatus = enum(u32) {
     finished_error,
 };
 
-pub const CFunction = *const fn (l: *State) Index;
-pub const Continuation = *const fn (l: *State, status: Status) Index;
+pub const CFunction = *const fn (l: *State) callconv(.c) i32;
+pub const Continuation = *const fn (l: *State, status: Status) callconv(.c) i32;
 
 pub const Alloc = *const fn (
     userdata: ?*anyopaque,
@@ -133,23 +137,38 @@ pub const Type = enum(i32) {
 pub const Number = f64;
 pub const Integer = i32;
 pub const Unsigned = u32;
+pub const Vector: type = @Vector(config.vector_size, f32);
 
 pub const Atom = enum(i32) { _ };
 
 pub const State = opaque {
-    extern fn lua_newstate(alloc_f: ?Alloc, userdata: ?*anyopaque) callconv(.c) *State;
-    extern fn lua_close(l: *State) callconv(.c) void;
-    extern fn lua_newthread(l: *State) callconv(.c) *State;
-    extern fn lua_mainthread(l: *State) callconv(.c) *State;
-    extern fn lua_resetthread(l: *State) callconv(.c) void;
-    extern fn lua_isthreadreset(l: *State) callconv(.c) bool;
+    fn tlua(l: *State) ?*raw.lua_State {
+        return @ptrCast(l);
+    }
 
-    pub inline fn init(allocator: *const std.mem.Allocator) *State {
-        return lua_newstate(alloc, @constCast(allocator));
+    fn flua(l: ?*raw.lua_State) !*State {
+        return @ptrCast(l orelse return error.NullLuaState);
+    }
+
+    pub inline fn init(a: *const std.mem.Allocator) !*State {
+        return try flua(raw.lua_newstate(alloc, @constCast(a)));
     }
 
     pub inline fn deinit(l: *State) void {
-        lua_close(l);
+        raw.lua_close(tlua(l));
+    }
+
+    pub fn allocator(l: *State) std.mem.Allocator {
+        var data: ?*std.mem.Allocator = undefined;
+        _ = raw.lua_getallocf(tlua(l), @ptrCast(&data));
+
+        if (data) |allocator_ptr| {
+            // Although the Allocator is passed to Lua as a pointer, return a
+            // copy to make use more convenient.
+            return allocator_ptr.*;
+        }
+
+        @panic("Lua.allocator() invalid on Lua states created without a Zig allocator");
     }
 
     /// Creates a new thread, pushes it on the stack, and returns a pointer to a lua_State that
@@ -158,505 +177,670 @@ pub const State = opaque {
     ///
     /// There is no explicit function to close or to destroy a thread. Threads are subject to garbage
     /// collection, like any Lua object.
-    pub inline fn initThread(l: *State) *State {
-        return lua_newthread(l);
+    pub inline fn initThread(l: *State) !*State {
+        return try flua(raw.lua_newthread(tlua(l)));
     }
 
     pub inline fn mainThread(l: *State) *State {
-        return lua_mainthread(l);
+        return try flua(raw.lua_mainthread(tlua(l)));
     }
 
     pub inline fn resetThread(l: *State) void {
-        lua_resetthread(l);
+        raw.lua_resetthread(tlua(l));
     }
 
     pub inline fn isThreadReset(l: *State) bool {
-        return lua_isthreadreset(l);
+        return raw.lua_isthreadreset(tlua(l));
     }
 
     // stack manipulation
-    extern fn lua_absindex(l: *State, idx: Index) callconv(.c) Index;
-    extern fn lua_gettop(l: *State) callconv(.c) Index;
-    extern fn lua_settop(l: *State, idx: Index) callconv(.c) void;
-    extern fn lua_remove(l: *State, idx: Index) callconv(.c) void;
-    extern fn lua_insert(l: *State, idx: Index) callconv(.c) void;
-    extern fn lua_replace(l: *State, idx: Index) callconv(.c) void;
-    extern fn lua_checkstack(l: *State, size: i32) callconv(.c) bool;
-    extern fn lua_rawcheckstack(l: *State, size: i32) callconv(.c) void;
-    extern fn lua_xmove(from: *State, to: *State, n: i32) callconv(.c) void;
-    extern fn lua_xpush(from: *State, to: *State, n: Index) callconv(.c) void;
 
     /// Converts the acceptable index idx into an equivalent absolute index (that is,
     /// one that does not depend on the stack top).
     pub inline fn absIndex(l: *State, idx: Index) Index {
-        return lua_absindex(l, idx);
+        return @enumFromInt(raw.lua_absindex(tlua(l), @intFromEnum(idx)));
     }
 
     /// Returns the index of the top element in the stack. Because indices start at 1,
     /// this result is equal to the number of elements in the stack; in particular, 0 means an empty stack.
     pub inline fn getTop(l: *State) Index {
-        return lua_gettop(l);
+        return @enumFromInt(raw.lua_gettop(tlua(l)));
     }
 
     /// Accepts any acceptable index, or 0, and sets the stack top to this index. If the new top is larger
     /// than the old one, then the new elements are filled with nil. If index is 0, then all stack elements
     /// are removed.
     pub inline fn setTop(l: *State, idx: Index) void {
-        return lua_settop(l, idx);
+        raw.lua_settop(tlua(l), @intFromEnum(idx));
+    }
+
+    /// Pops count value from the stack
+    pub inline fn pop(l: *State, count: i32) void {
+        raw.lua_settop(tlua(l), -count - 1);
     }
 
     /// Removes the element at the given valid index, shifting down the elements above this index to fill
     /// the gap. Cannot be called with a pseudo-index, because a pseudo-index is not an actual stack position.
     pub inline fn remove(l: *State, idx: Index) void {
-        return lua_remove(l, idx);
+        raw.lua_remove(tlua(l), @intFromEnum(idx));
     }
 
     /// Moves the top element into the given valid index, shifting up the elements above this index to open space.
     /// Cannot be called with a pseudo-index, because a pseudo-index is not an actual stack position.
     pub inline fn insert(l: *State, idx: Index) void {
-        return lua_insert(l, idx);
+        raw.lua_insert(tlua(l), @intFromEnum(idx));
     }
 
     /// Moves the top element into the given position (and pops it), without shifting any element
     /// (therefore replacing the value at the given position).
     pub inline fn replace(l: *State, idx: Index) void {
-        return lua_replace(l, idx);
+        raw.lua_replace(tlua(l), @intFromEnum(idx));
     }
 
     /// Ensures that there are at least extra free stack slots in the stack. It returns false if
     /// it cannot grow the stack to that size. This function never shrinks the stack; if the stack
     /// is already larger than the new size, it is left unchanged.
     pub inline fn checkStack(l: *State, size: i32) bool {
-        return lua_checkstack(l, size);
+        return raw.lua_checkstack(tlua(l), size) != 0;
     }
 
     /// like checkStack but allows for unlimited stack frames
     pub inline fn rawCheckStack(l: *State, size: i32) void {
-        return lua_rawcheckstack(l, size);
+        raw.lua_checkstack(tlua(l), size);
     }
 
     /// Exchange values between different threads of the same global state.
     /// This function pops n values from the stack from, and pushes them onto the stack to.
     pub inline fn xmove(from: *State, to: *State, n: i32) void {
-        return lua_xmove(from, to, n);
+        raw.lua_xmove(tlua(from), tlua(to), n);
     }
 
     /// see xmove, but doesn't pop the values from the stack
     pub inline fn xpush(from: *State, to: *State, n: Index) void {
-        return lua_xpush(from, to, n);
+        raw.lua_xpush(tlua(from), tlua(to), @intFromEnum(n));
     }
 
     // access functions
-    extern fn lua_isnumber(l: *State, idx: Index) callconv(.c) bool;
-    extern fn lua_isstring(l: *State, idx: Index) callconv(.c) bool;
-    extern fn lua_iscfunction(l: *State, idx: Index) callconv(.c) bool;
-    extern fn lua_isLfunction(l: *State, idx: Index) callconv(.c) bool;
-    extern fn lua_isuserdata(l: *State, idx: Index) callconv(.c) bool;
-    extern fn lua_type(l: *State, idx: Index) callconv(.c) Type;
-    extern fn lua_typename(l: *State, tp: Type) callconv(.c) [*:0]const u8;
-
-    extern fn lua_equal(l: *State, a: Index, b: Index) callconv(.c) bool;
-    extern fn lua_rawequal(l: *State, a: Index, b: Index) callconv(.c) bool;
-    extern fn lua_lessthan(l: *State, a: Index, b: Index) callconv(.c) bool;
-
-    extern fn lua_tonumberx(l: *State, idx: Index, isnum: ?*bool) callconv(.c) Number;
-    extern fn lua_tointegerx(l: *State, idx: Index, isnum: ?*bool) callconv(.c) Integer;
-    extern fn lua_tounsignedx(l: *State, idx: Index, isnum: ?*bool) callconv(.c) Unsigned;
-    extern fn lua_tovector(l: *State, idx: Index) callconv(.c) *[config.vector_size]Number;
-    extern fn lua_toboolean(l: *State, idx: Index) callconv(.c) bool;
-    extern fn lua_tolstring(l: *State, idx: Index, len: ?*usize) callconv(.c) [*:0]const u8;
-    extern fn lua_tostringatom(l: *State, idx: Index, atom: ?*i32) callconv(.c) [*:0]const u8;
-    extern fn lua_tolstringatom(l: *State, idx: Index, len: ?*usize, atom: ?*i32) callconv(.c) [*:0]const u8;
-    extern fn lua_namecallatom(l: *State, atom: ?*i32) callconv(.c) [*:0]const u8;
-    extern fn lua_objlen(l: *State, idx: Index) callconv(.c) i32;
-    extern fn lua_tocfunction(l: *State, idx: Index) callconv(.c) CFunction;
-    extern fn lua_tolightuserdata(l: *State, idx: Index) callconv(.c) *anyopaque;
-    extern fn lua_tolightuserdatatagged(l: *State, idx: Index, tag: i32) callconv(.c) *anyopaque;
-    extern fn lua_touserdata(l: *State, idx: Index) callconv(.c) *anyopaque;
-    extern fn lua_touserdatatagged(l: *State, idx: Index, tag: i32) callconv(.c) *anyopaque;
-    extern fn lua_userdatatag(l: *State, idx: Index) callconv(.c) i32;
-    extern fn lua_lightuserdatatag(l: *State, idx: Index) callconv(.c) i32;
-    extern fn lua_tothread(l: *State, idx: Index) callconv(.c) *State;
-    extern fn lua_tobuffer(l: *State, idx: Index, len: ?*usize) callconv(.c) [*]const u8;
-    extern fn lua_topointer(l: *State, idx: Index) callconv(.c) [*]const u8;
 
     pub inline fn isNumber(l: *State, idx: Index) bool {
-        return lua_isnumber(l, idx);
+        return raw.lua_isnumber(tlua(l), @intFromEnum(idx)) != 0;
     }
 
     pub inline fn isString(l: *State, idx: Index) bool {
-        return lua_isstring(l, idx);
+        return raw.lua_isstring(tlua(l), @intFromEnum(idx)) != 0;
     }
 
     pub inline fn isCFunction(l: *State, idx: Index) bool {
-        return lua_iscfunction(l, idx);
+        return raw.lua_iscfunction(tlua(l), @intFromEnum(idx)) != 0;
     }
 
     pub inline fn isLFunction(l: *State, idx: Index) bool {
-        return lua_isLfunction(l, idx);
+        return raw.lua_isLfunction(tlua(l), @intFromEnum(idx)) != 0;
     }
 
     pub inline fn isUserdata(l: *State, idx: Index) bool {
-        return lua_isuserdata(l, idx);
+        return raw.lua_isuserdata(tlua(l), @intFromEnum(idx)) != 0;
     }
 
     pub inline fn @"type"(l: *State, idx: Index) Type {
-        return lua_type(l, idx);
+        return @enumFromInt(raw.lua_type(tlua(l), @intFromEnum(idx)));
+    }
+
+    pub inline fn isNil(l: *State, idx: Index) bool {
+        return l.type(idx) == .nil;
     }
 
     pub inline fn typeName(l: *State, tp: Type) [*:0]const u8 {
-        return lua_typename(l, tp);
+        return raw.lua_typename(tlua(l), @intFromEnum(tp));
     }
 
     pub inline fn equal(l: *State, a: Index, b: Index) bool {
-        return lua_equal(l, a, b);
+        return raw.lua_equal(tlua(l), @intFromEnum(a), @intFromEnum(b)) != 0;
     }
 
     pub inline fn rawequal(l: *State, a: Index, b: Index) bool {
-        return lua_rawequal(l, a, b);
+        return raw.lua_rawequal(tlua(l), @intFromEnum(a), @intFromEnum(b)) != 0;
     }
 
     pub inline fn lessThan(l: *State, a: Index, b: Index) bool {
-        return lua_lessthan(l, a, b);
+        return raw.lua_lessthan(tlua(l), @intFromEnum(a), @intFromEnum(b)) != 0;
     }
 
-    pub inline fn toNumberx(l: *State, idx: Index, isnum: ?*bool) Number {
-        return lua_tonumberx(l, idx, isnum);
+    pub inline fn toNumberx(l: *State, idx: Index) ?Number {
+        var isnum: bool align(4) = false;
+        const result = raw.lua_tonumberx(tlua(l), @intFromEnum(idx), @ptrCast(@alignCast(&isnum)));
+        return if (isnum) result else null;
     }
 
-    pub inline fn toIntegerx(l: *State, idx: Index, isnum: ?*bool) Integer {
-        return lua_tointegerx(l, idx, isnum);
+    pub inline fn toIntegerx(l: *State, idx: Index) ?Integer {
+        var isnum: bool align(4) = false;
+        const result = raw.lua_tointegerx(tlua(l), @intFromEnum(idx), @ptrCast(@alignCast(&isnum)));
+        return if (isnum) result else null;
     }
 
-    pub inline fn toUnsignedx(l: *State, idx: Index, isnum: ?*bool) Unsigned {
-        return lua_tounsignedx(l, idx, isnum);
+    pub inline fn toUnsignedx(l: *State, idx: Index) ?Unsigned {
+        var isnum: bool align(4) = false;
+        const result = raw.lua_tounsignedx(tlua(l), @intFromEnum(idx), @ptrCast(@alignCast(&isnum)));
+        return if (isnum) result else null;
     }
 
     pub inline fn toVector(l: *State, idx: Index) *[config.vector_size]Number {
-        return lua_tovector(l, idx);
+        return @ptrCast(raw.lua_tovector(tlua(l), @intFromEnum(idx)));
     }
 
     pub inline fn toBoolean(l: *State, idx: Index) bool {
-        return lua_toboolean(l, idx);
+        return raw.lua_toboolean(tlua(l), @intFromEnum(idx)) != 0;
     }
 
-    pub inline fn toLengthString(l: *State, idx: Index) []const u8 {
+    pub inline fn toLengthString(l: *State, idx: Index) [:0]const u8 {
         var len: usize = 0;
-        return lua_tolstring(l, idx, &len)[0..len];
+        return if (raw.lua_tolstring(tlua(l), @intFromEnum(idx), &len)) |ptr| ptr[0..len :0] else "";
     }
 
     pub inline fn toStringAtom(l: *State, idx: Index, atom: ?*Atom) [*:0]const u8 {
-        return lua_tostringatom(l, idx, atom);
+        return @ptrCast(raw.lua_tostringatom(tlua(l), @intFromEnum(idx), @ptrCast(atom)));
     }
 
-    pub inline fn toLengthStringAtom(l: *State, idx: Index, atom: ?*Atom) [*:0]const u8 {
+    pub inline fn toLengthStringAtom(l: *State, idx: Index, atom: ?*Atom) [:0]const u8 {
         var len: usize = 0;
-        return lua_tolstringatom(l, idx, &len, atom)[0..len];
+        return raw.lua_tolstringatom(tlua(l), @intFromEnum(idx), &len, @ptrCast(atom))[0..len :0];
     }
 
     pub inline fn nameCallAtom(l: *State, atom: ?*Atom) [*:0]const u8 {
-        return lua_namecallatom(l, atom);
+        return @ptrCast(raw.lua_namecallatom(tlua(l), @ptrCast(atom)));
     }
 
     pub inline fn objLen(l: *State, idx: Index) i32 {
-        return lua_objlen(l, idx);
+        return raw.lua_objlen(tlua(l), @intFromEnum(idx));
     }
 
     pub inline fn toCFunction(l: *State, idx: Index) CFunction {
-        return lua_tocfunction(l, idx);
+        return @ptrCast(raw.lua_tocfunction(tlua(l), @intFromEnum(idx)));
     }
 
-    pub inline fn toLightUserdata(l: *State, idx: Index) *anyopaque {
-        return lua_tolightuserdata(l, idx);
+    pub inline fn toLightUserdata(l: *State, idx: Index) ?*anyopaque {
+        return raw.lua_touserdata(tlua(l), @intFromEnum(idx));
     }
 
-    pub inline fn toLightUserdataTagged(l: *State, idx: Index, tag: i32) *anyopaque {
-        return lua_tolightuserdatatagged(l, idx, tag);
+    pub inline fn toLightUserdataTagged(l: *State, idx: Index, tag: i32) ?*anyopaque {
+        return raw.lua_touserdatatagged(tlua(l), @intFromEnum(idx), tag);
     }
 
-    pub inline fn toUserdata(l: *State, idx: Index) *anyopaque {
-        return lua_touserdata(l, idx);
+    pub inline fn toUserdata(l: *State, idx: Index) ?*anyopaque {
+        return raw.lua_touserdata(tlua(l), @intFromEnum(idx));
     }
 
     pub inline fn toUserdataTagged(l: *State, idx: Index, tag: i32) *anyopaque {
-        return lua_touserdatatagged(l, idx, tag);
+        return raw.lua_touserdatatagged(tlua(l), @intFromEnum(idx), tag);
     }
 
     pub inline fn userdataTag(l: *State, idx: Index) i32 {
-        return lua_userdatatag(l, idx);
+        return raw.lua_userdatatag(tlua(l), @intFromEnum(idx));
     }
 
     pub inline fn lightUserdataTag(l: *State, idx: Index) i32 {
-        return lua_lightuserdatatag(l, idx);
+        return raw.lua_lightuserdatatag(tlua(l), @intFromEnum(idx));
     }
 
-    pub inline fn toThread(l: *State, idx: Index) *State {
-        return lua_tothread(l, idx);
+    pub inline fn toThread(l: *State, idx: Index) !*State {
+        return try flua(raw.lua_tothread(tlua(l), @intFromEnum(idx)));
     }
 
-    pub inline fn toBuffer(l: *State, idx: Index) [*]const u8 {
+    pub inline fn toBuffer(l: *State, idx: Index) []const u8 {
         var len: usize = 0;
-        return lua_tobuffer(l, idx, &len)[0..len];
+        const ptr: [*]const u8 = @ptrCast(raw.lua_tobuffer(tlua(l), @intFromEnum(idx), &len)[0..len] orelse return &.{});
+        return ptr[0..len];
     }
 
-    pub inline fn toPointer(l: *State, idx: Index) [*]const u8 {
-        return lua_topointer(l, idx);
+    pub inline fn toPointer(l: *State, idx: Index) ?*const anyopaque {
+        // return lua_topointer(l, idx);
+        return raw.lua_topointer(tlua(l), @intFromEnum(idx));
     }
 
     // push functions
-    extern fn lua_pushnil(l: *State) callconv(.c) void;
-    extern fn lua_pushnumber(l: *State, n: Number) callconv(.c) void;
-    extern fn lua_pushinteger(l: *State, n: Integer) callconv(.c) void;
-    extern fn lua_pushunsigned(l: *State, n: Unsigned) callconv(.c) void;
-    pub const size_4 = struct {
-        extern fn lua_pushvector(l: *State, x: Number, y: Number, z: Number, w: Number) callconv(.c) void;
-    };
-    pub const size_3 = struct {
-        extern fn lua_pushvector(l: *State, x: Number, y: Number, z: Number) callconv(.c) void;
-    };
-    extern fn lua_pushlstring(l: *State, s: [*:0]const u8, l: usize) callconv(.c) void;
-    extern fn lua_pushstring(l: *State, s: [*:0]const u8) callconv(.c) void;
-    extern fn lua_pushclosurek(l: *State, f: CFunction, debug_name: [*:0]const u8, nup: i32, cont: Continuation) callconv(.c) void;
-    extern fn lua_pushboolean(l: *State, b: bool) callconv(.c) void;
-    // true if main thread
-    extern fn lua_pushthread(l: *State) callconv(.c) bool;
-
-    extern fn lua_pushlightuserdatatagged(l: *State, p: *anyopaque, tag: i32) callconv(.c) void;
-    extern fn lua_newuserdatatagged(l: *State, sz: usize, tag: i32) callconv(.c) *anyopaque;
-    extern fn lua_newuserdatataggedwithmetatable(l: *State, sz: usize, tag: i32) callconv(.c) *anyopaque;
-    extern fn lua_newuserdatadtor(l: *State, sz: usize, dtor: *fn (ptr: *anyopaque) void) callconv(.c) *anyopaque;
-
-    extern fn lua_newbuffer(l: *State, sz: usize) callconv(.c) [*]u8;
 
     pub inline fn pushNil(l: *State) void {
-        return lua_pushnil(l);
+        raw.lua_pushnil(tlua(l));
     }
 
     pub inline fn pushNumber(l: *State, n: Number) void {
-        return lua_pushnumber(l, n);
+        raw.lua_pushnumber(tlua(l), n);
     }
 
     pub inline fn pushInteger(l: *State, n: Integer) void {
-        return lua_pushinteger(l, n);
+        raw.lua_pushinteger(tlua(l), n);
     }
 
     pub inline fn pushUnsigned(l: *State, n: Unsigned) void {
-        return lua_pushunsigned(l, n);
+        raw.lua_pushunsigned(tlua(l), n);
     }
 
-    pub inline fn pushVector(l: *State, vector: [config.vector_size]Number) void {
+    pub inline fn pushVector(l: *State, vector: Vector) void {
         if (config.vector_size == 4) {
-            return size_4.lua_pushvector(l, vector[0], vector[1], vector[2], vector[3]);
+            raw.lua_pushvector(tlua(l), vector[0], vector[1], vector[2], vector[3]);
         } else {
-            return size_3.lua_pushvector(l, vector[0], vector[1], vector[2]);
+            raw.lua_pushvector(tlua(l), vector[0], vector[1], vector[2]);
         }
     }
 
     pub inline fn pushLengthString(l: *State, s: []const u8) void {
-        return lua_pushlstring(l, s, @intCast(s.len));
+        raw.lua_pushlstring(tlua(l), s.ptr, @intCast(s.len));
     }
 
     pub inline fn pushString(l: *State, s: [*:0]const u8) void {
-        return lua_pushstring(l, s);
+        raw.lua_pushstring(tlua(l), s);
     }
 
-    pub inline fn pushClosurek(l: *State, f: CFunction, debug_name: [*:0]const u8, upvalues: i32, cont: Continuation) void {
-        return lua_pushclosurek(l, f, debug_name, upvalues, cont);
+    inline fn isArgComptimeKnown(value: anytype) bool {
+        return @typeInfo(@TypeOf(.{value})).@"struct".fields[0].is_comptime;
+    }
+
+    /// Push a zig comptime formatted string onto the stack
+    pub fn pushFmtString(l: *State, comptime fmt: []const u8, args: anytype) !void {
+        if (isArgComptimeKnown(args))
+            l.pushLengthString(std.fmt.comptimePrint(fmt, args))
+        else {
+            const lua_allocator = l.allocator();
+            const str = try std.fmt.allocPrint(lua_allocator, fmt, args);
+            defer lua_allocator.free(str);
+            l.pushLengthString(str);
+        }
+    }
+
+    pub inline fn pushClosurek(
+        l: *State,
+        f: CFunction,
+        debug_name: [*:0]const u8,
+        upvalues: i32,
+        cont: ?Continuation,
+    ) void {
+        raw.lua_pushcclosurek(tlua(l), @ptrCast(f), debug_name, upvalues, @ptrCast(cont));
+    }
+
+    pub inline fn pushClosure(l: *State, f: CFunction, debug_name: [*:0]const u8, upvalues: i32) void {
+        l.pushClosurek(f, debug_name, upvalues, null);
+    }
+
+    pub inline fn pushCFunction(l: *State, f: CFunction, debug_name: [*:0]const u8) void {
+        l.pushClosure(f, debug_name, 0);
+    }
+
+    pub inline fn pushFunction(l: *State, comptime f: anytype, debug_name: [*:0]const u8) void {
+        l.pushCFunction(toCFn(f), debug_name);
     }
 
     pub inline fn pushBoolean(l: *State, b: bool) void {
-        return lua_pushboolean(l, b);
+        raw.lua_pushboolean(tlua(l), if (b) 1 else 0);
     }
 
     /// returns true if the main thread
     pub inline fn pushThread(l: *State) bool {
-        return lua_pushthread(l);
+        return raw.lua_pushthread(tlua(l)) != 0;
     }
 
     pub inline fn pushLightUserdataTagged(l: *State, p: *anyopaque, tag: i32) void {
-        return lua_pushlightuserdatatagged(l, p, tag);
+        raw.lua_pushlightuserdatatagged(tlua(l), p, tag);
     }
 
-    pub inline fn newUserdataTagged(l: *State, sz: usize, tag: i32) *anyopaque {
-        return lua_newuserdatatagged(l, sz, tag);
+    pub inline fn pushLightUserdata(l: *State, p: *anyopaque) void {
+        return l.pushLightUserdataTagged(p, 0);
     }
 
-    pub inline fn newUserdataTaggedWithMetatable(l: *State, sz: usize, tag: i32) *anyopaque {
-        return lua_newuserdatataggedwithmetatable(l, sz, tag);
+    pub inline fn newUserdataTagged(l: *State, sz: usize, tag: i32) ?*anyopaque {
+        return raw.lua_newuserdatatagged(tlua(l), sz, tag);
     }
 
-    pub inline fn newUserdataDtor(l: *State, sz: usize, dtor: *fn (ptr: *anyopaque) void) *anyopaque {
-        return lua_newuserdatadtor(l, sz, dtor);
+    pub inline fn newUserdataTaggedWithMetatable(l: *State, sz: usize, tag: i32) ?*anyopaque {
+        return raw.lua_newuserdatataggedwithmetatable(tlua(l), sz, tag);
+    }
+
+    pub inline fn newUserdataDtor(l: *State, sz: usize, dtor: ?*fn (ptr: ?*anyopaque) callconv(.c) void) ?*anyopaque {
+        // return lua_newuserdatadtor(l, sz, dtor);
+        return raw.lua_newuserdatadtor(tlua(l), sz, dtor);
     }
 
     pub inline fn newBuffer(l: *State, sz: usize) []u8 {
-        return lua_newbuffer(l, sz)[0..sz];
+        const ptr: [*]u8 = @ptrCast(raw.lua_newbuffer(tlua(l), sz) orelse return &.{});
+        return ptr[0..sz];
     }
 
     // get functions
-    extern fn lua_gettable(l: *State, idx: Index) callconv(.c) void;
-    extern fn lua_getfield(l: *State, idx: Index, k: [*:0]const u8) callconv(.c) void;
-    extern fn lua_rawgetfield(l: *State, idx: Index, k: [*:0]const u8) callconv(.c) void;
-    extern fn lua_rawget(l: *State, idx: Index) callconv(.c) void;
-    extern fn lua_rawgeti(l: *State, idx: Index, n: i32) callconv(.c) void;
-    extern fn lua_createtable(l: *State, narr: i32, nrec: i32) callconv(.c) void;
-
-    extern fn lua_setreadonly(l: *State, idx: Index, enabled: i32) callconv(.c) void;
-    extern fn lua_getreadonly(l: *State, idx: Index) callconv(.c) i32;
-    extern fn lua_setsafeenv(l: *State, idx: Index, enabled: bool) callconv(.c) void;
-
-    extern fn lua_getmetatable(l: *State, objindex: Index) callconv(.c) i32;
-    extern fn lua_getfenv(l: *State, idx: Index) callconv(.c) void;
-
-    pub inline fn getTable(l: *State, idx: Index) void {
-        return lua_gettable(l, idx);
+    pub inline fn getTable(l: *State, idx: Index) Type {
+        return @enumFromInt(raw.lua_gettable(tlua(l), @intFromEnum(idx)));
     }
 
-    pub inline fn getField(l: *State, idx: Index, k: [:0]const u8) void {
-        return lua_getfield(l, idx, k.ptr);
+    pub inline fn getField(l: *State, idx: Index, k: [:0]const u8) Type {
+        // return lua_getfield(l, idx, k.ptr);
+        return @enumFromInt(raw.lua_getfield(tlua(l), @intFromEnum(idx), k));
     }
 
-    pub inline fn rawGetField(l: *State, idx: Index, k: [:0]const u8) void {
-        return lua_rawgetfield(l, idx, k);
+    pub inline fn rawGetField(l: *State, idx: Index, k: [:0]const u8) Type {
+        // return lua_rawgetfield(l, idx, k);
+        return @enumFromInt(raw.lua_rawgetfield(tlua(l), @intFromEnum(idx), k));
     }
 
-    pub inline fn rawGet(l: *State, idx: Index) void {
-        return lua_rawget(l, idx);
+    pub inline fn rawGet(l: *State, idx: Index) Type {
+        return @enumFromInt(raw.lua_rawget(tlua(l), @intFromEnum(idx)));
     }
 
-    pub inline fn rawGeti(l: *State, idx: Index, n: i32) void {
-        return lua_rawgeti(l, idx, n);
+    pub inline fn rawGeti(l: *State, idx: Index, n: i32) Type {
+        return @enumFromInt(raw.lua_rawgeti(tlua(l), @intFromEnum(idx), n));
     }
 
     pub inline fn createTable(l: *State, narr: i32, nrec: i32) void {
-        return lua_createtable(l, narr, nrec);
+        raw.lua_createtable(tlua(l), narr, nrec);
     }
 
     pub inline fn setReadonly(l: *State, idx: Index, enabled: bool) void {
-        return lua_setreadonly(l, idx, if (enabled) 1 else 0);
+        raw.lua_setreadonly(tlua(l), @intFromEnum(idx), if (enabled) 1 else 0);
     }
 
     pub inline fn getReadonly(l: *State, idx: Index) bool {
-        return lua_getreadonly(l, idx) != 0;
+        return raw.lua_getreadonly(tlua(l), @intFromEnum(idx)) != 0;
     }
 
     pub inline fn setSafeEnv(l: *State, idx: Index, enabled: bool) void {
-        return lua_setsafeenv(l, idx, enabled);
+        // return lua_setsafeenv(l, idx, enabled);
+        raw.lua_setsafeenv(tlua(l), @intFromEnum(idx), if (enabled) 1 else 0);
     }
 
-    pub inline fn getMetatable(l: *State, objindex: Index) i32 {
-        return lua_getmetatable(l, objindex);
+    pub inline fn getMetatable(l: *State, objindex: Index) Index {
+        return @enumFromInt(raw.lua_getmetatable(tlua(l), @intFromEnum(objindex)));
     }
 
-    pub inline fn getFenv(l: *State, idx: Index) void {
-        return lua_getfenv(l, idx);
+    pub inline fn getFenv(l: *State, idx: Index) Index {
+        return @enumFromInt(raw.lua_getfenv(tlua(l), @intFromEnum(idx)));
     }
 
     // set functions
-    extern fn lua_settable(l: *State, idx: Index) callconv(.c) void;
-    extern fn lua_setfield(l: *State, idx: Index, k: [*:0]const u8) callconv(.c) void;
-    extern fn lua_rawsetfield(l: *State, idx: Index, k: [*:0]const u8) callconv(.c) void;
-    extern fn lua_rawset(l: *State, idx: Index) callconv(.c) void;
-    extern fn lua_rawseti(l: *State, idx: Index, n: i32) callconv(.c) void;
-    extern fn lua_setmetatable(l: *State, objindex: Index) callconv(.c) i32;
-    extern fn lua_setfenv(l: *State, idx: Index) callconv(.c) i32;
 
     pub inline fn setTable(l: *State, idx: Index) void {
-        return lua_settable(l, idx);
+        return raw.lua_settable(tlua(l), @intFromEnum(idx));
     }
 
     pub inline fn setField(l: *State, idx: Index, k: [:0]const u8) void {
-        return lua_setfield(l, idx, k);
+        return raw.lua_setfield(tlua(l), @intFromEnum(idx), k);
     }
 
     pub inline fn rawSetField(l: *State, idx: Index, k: [:0]const u8) void {
-        return lua_rawsetfield(l, idx, k);
+        return raw.lua_rawsetfield(tlua(l), @intFromEnum(idx), k);
     }
 
     pub inline fn rawSet(l: *State, idx: Index) void {
-        return lua_rawset(l, idx);
+        return raw.lua_rawset(tlua(l), @intFromEnum(idx));
     }
 
     pub inline fn rawSeti(l: *State, idx: Index, n: i32) void {
-        return lua_rawseti(l, idx, n);
+        return raw.lua_rawseti(tlua(l), @intFromEnum(idx), n);
     }
 
-    pub inline fn setMetatable(l: *State, objindex: Index) i32 {
-        return lua_setmetatable(l, objindex);
+    pub inline fn setMetatable(l: *State, objindex: Index) void {
+        _ = raw.lua_setmetatable(tlua(l), @intFromEnum(objindex));
     }
 
-    pub inline fn setFenv(l: *State, idx: Index) i32 {
-        return lua_setfenv(l, idx);
+    pub inline fn setFenv(l: *State, idx: Index) bool {
+        return raw.lua_setfenv(tlua(l), @intFromEnum(idx)) != 0;
     }
 
     // load and call functions
-    extern fn luau_load(l: *State, chunkname: [*:0]const u8, data: [*]const u8, size: usize, env: i32) callconv(.c) i32;
-    extern fn lua_call(l: *State, nargs: i32, nresults: i32) callconv(.c) void;
-    extern fn lua_pcall(l: *State, nargs: i32, nresults: i32, errfunc: i32) callconv(.c) i32;
 
-    pub inline fn loadEnv(l: *State, chunkname: [:0]const u8, data: []const u8, env: i32) i32 {
-        return luau_load(l, chunkname.ptr, data.ptr, data.len, env);
+    pub inline fn loadEnv(l: *State, chunkname: [:0]const u8, data: []const u8, env: i32) bool {
+        return raw.luau_load(tlua(l), chunkname, data.ptr, @intCast(data.len), env) == 0;
     }
 
-    pub inline fn load(l: *State, chunkname: [:0]const u8, data: []const u8) i32 {
+    pub inline fn load(l: *State, chunkname: [:0]const u8, data: []const u8) bool {
         return l.loadEnv(chunkname, data, 0);
     }
 
     pub inline fn call(l: *State, nargs: i32, nresults: i32) void {
-        return lua_call(l, nargs, nresults);
+        raw.lua_call(tlua(l), nargs, nresults);
     }
 
-    pub inline fn pcall(l: *State, nargs: i32, nresults: i32, errfunc: i32) i32 {
-        return lua_pcall(l, nargs, nresults, errfunc);
+    pub inline fn pcall(l: *State, nargs: i32, nresults: i32, errfunc: Index) Status {
+        return @enumFromInt(raw.lua_pcall(tlua(l), nargs, nresults, @intFromEnum(errfunc)));
     }
 
     // coroutine functions
-    extern fn lua_yield(l: *State, nresults: i32) callconv(.c) i32;
-    extern fn lua_break(l: *State) callconv(.c) i32;
-    extern fn lua_resume(l: *State, from: *State, narg: i32) callconv(.c) i32;
-    extern fn lua_resumeerror(l: *State, from: *State) callconv(.c) i32;
-    extern fn lua_status(l: *State) callconv(.c) i32;
-    extern fn lua_isyieldable(l: *State) callconv(.c) i32;
-    extern fn lua_getthreaddata(l: *State) callconv(.c) *anyopaque;
-    extern fn lua_setthreaddata(l: *State, data: *anyopaque) callconv(.c) void;
-    extern fn lua_costatus(l: *State, co: *State) callconv(.c) CoroutineStatus;
 
     pub inline fn yield(l: *State, nresults: i32) i32 {
-        return lua_yield(l, nresults);
+        return raw.lua_yield(tlua(l), nresults);
     }
 
     pub inline fn @"break"(l: *State) i32 {
-        return lua_break(l);
+        return raw.lua_break(tlua(l));
     }
 
     pub inline fn @"resume"(l: *State, from: *State, narg: i32) i32 {
-        return lua_resume(l, from, narg);
+        return raw.lua_resume(tlua(l), tlua(from), narg);
     }
 
     pub inline fn resumeError(l: *State, from: *State) i32 {
-        return lua_resumeerror(l, from);
+        return raw.lua_resumeerror(tlua(l), tlua(from));
     }
 
     pub inline fn status(l: *State) Status {
-        return @enumFromInt(lua_status(l));
+        return @enumFromInt(raw.lua_status(tlua(l)));
     }
 
     pub inline fn isYieldable(l: *State) bool {
-        return lua_isyieldable(l) == 1;
+        return raw.lua_isyieldable(tlua(l)) == 1;
     }
 
-    pub inline fn getThreadData(l: *State) *anyopaque {
-        return lua_getthreaddata(l);
+    pub inline fn getThreadData(l: *State) ?*anyopaque {
+        return raw.lua_getthreaddata(tlua(l));
     }
 
-    pub inline fn setThreadData(l: *State, data: *anyopaque) void {
-        return lua_setthreaddata(l, data);
+    pub inline fn setThreadData(l: *State, data: ?*anyopaque) void {
+        return raw.lua_setthreaddata(tlua(l), data);
     }
 
     pub inline fn coStatus(l: *State, co: *State) CoroutineStatus {
-        return lua_costatus(l, co);
+        return raw.lua_costatus(tlua(l), tlua(co));
+    }
+
+    // garbage-collection functions
+    pub inline fn gc(l: *State, what: GcOp) i32 {
+        switch (what) {
+            inline .set_goal,
+            .set_step_mul,
+            .set_step_size,
+            => |value, tag| return raw.lua_gc(tlua(l), @intFromEnum(tag), value),
+            inline else => |_, tag| return raw.lua_gc(tlua(l), @intFromEnum(tag), 0),
+        }
+    }
+
+    pub inline fn setMemCategory(l: *State, category: i32) void {
+        return raw.lua_setmemcat(tlua(l), category);
+    }
+
+    pub inline fn totalBytes(l: *State, category: i32) usize {
+        return raw.lua_totalbytes(tlua(l), category);
+    }
+
+    pub inline fn err(l: *State) noreturn {
+        raw.lua_error(tlua(l));
+    }
+
+    pub inline fn errStr(l: *State, comptime fmt: []const u8, args: anytype) noreturn {
+        l.pushFmtString(fmt, args) catch l.pushString(fmt);
+        l.err();
+    }
+
+    pub inline fn debugTrace(l: *State) [:0]const u8 {
+        return std.mem.span(raw.lua_debugtrace(tlua(l)));
+    }
+
+    // utils (aux)
+
+    pub fn getMetatableRegistry(l: *State, table_name: [:0]const u8) Type {
+        return l.getField(.registry, table_name);
+    }
+
+    pub fn getGlobal(l: *State, name: [:0]const u8) Type {
+        return l.getField(.globals, name);
+    }
+
+    pub fn setGlobal(l: *State, name: [:0]const u8) void {
+        l.setField(.globals, name);
+    }
+
+    pub const Reg = extern struct {
+        name: [*:0]const u8 = "",
+        func: ?CFunction = null,
+    };
+
+    pub inline fn newMetatable(l: *State, key: [:0]const u8) !void {
+        if (raw.luaL_newmetatable(l, key.ptr) == 0) {
+            return error.FailedToCreateMetatable;
+        }
+    }
+
+    const LUA_COLIBNAME = "coroutine";
+    const LUA_TABLIBNAME = "table";
+    const LUA_OSLIBNAME = "os";
+    const LUA_STRLIBNAME = "string";
+    const LUA_BITLIBNAME = "bit32";
+    const LUA_BUFFERLIBNAME = "buffer";
+    const LUA_UTF8LIBNAME = "utf8";
+    const LUA_MATHLIBNAME = "math";
+    const LUA_DBLIBNAME = "debug";
+    const LUA_VECLIBNAME = "vector";
+
+    pub fn open(l: *State, libs: OpenLibraries) void {
+        if (libs.base) l.require("", @ptrCast(&raw.luaopen_base));
+        if (libs.coroutine) l.require(LUA_COLIBNAME, @ptrCast(&raw.luaopen_coroutine));
+        if (libs.table) l.require(LUA_TABLIBNAME, @ptrCast(&raw.luaopen_table));
+        if (libs.os) l.require(LUA_OSLIBNAME, @ptrCast(&raw.luaopen_os));
+        if (libs.string) l.require(LUA_STRLIBNAME, @ptrCast(&raw.luaopen_string));
+        if (libs.bit32) l.require(LUA_BITLIBNAME, @ptrCast(&raw.luaopen_bit32));
+        if (libs.buffer) l.require(LUA_BUFFERLIBNAME, @ptrCast(&raw.luaopen_buffer));
+        if (libs.utf8) l.require(LUA_UTF8LIBNAME, @ptrCast(&raw.luaopen_utf8));
+        if (libs.math) l.require(LUA_MATHLIBNAME, @ptrCast(&raw.luaopen_math));
+        if (libs.debug) l.require(LUA_DBLIBNAME, @ptrCast(&raw.luaopen_debug));
+        if (libs.vector) l.require(LUA_VECLIBNAME, @ptrCast(&raw.luaopen_vector));
+    }
+
+    pub inline fn require(l: *State, name: [:0]const u8, func: CFunction) void {
+        l.pushCFunction(func, name);
+        l.pushString(name);
+        l.call(1, 0);
     }
 };
+
+pub const OpenLibraries = struct {
+    base: bool = true,
+    coroutine: bool = true,
+    table: bool = true,
+    os: bool = true,
+    string: bool = true,
+    bit32: bool = true,
+    buffer: bool = true,
+    utf8: bool = true,
+    math: bool = true,
+    debug: bool = true,
+    vector: bool = true,
+
+    pub const none: OpenLibraries = .{
+        .base = false,
+        .coroutine = false,
+        .table = false,
+        .os = false,
+        .string = false,
+        .bit32 = false,
+        .buffer = false,
+        .utf8 = false,
+        .math = false,
+        .debug = false,
+        .vector = false,
+    };
+};
+
+pub const GcOp = union(RawGcOp) {
+    stop,
+    restart,
+    collect,
+    count,
+    countb,
+    is_running,
+    step,
+    set_goal: i32,
+    set_step_mul: i32,
+    set_step_size: i32,
+};
+
+pub const RawGcOp = enum(c_uint) {
+    stop = 0,
+    restart = 1,
+    collect = 2,
+    count = 3,
+    countb = 4,
+    is_running = 5,
+    step = 6,
+    set_goal = 7,
+    set_step_mul = 8,
+    set_step_size = 9,
+};
+
+pub const ZigFnInt = *const fn (state: *State) i32;
+pub const ZigFnVoid = *const fn (state: *State) void;
+pub const ZigFnErrorSet = *const fn (state: *State) anyerror!i32;
+
+pub fn zigToCFn(comptime fn_ty: std.builtin.Type.Fn, comptime f: anytype) CFunction {
+    const ri = @typeInfo(fn_ty.return_type orelse @compileError("Fn must return something"));
+    switch (ri) {
+        .int => |_| {
+            _ = @as(ZigFnInt, f);
+            return struct {
+                fn inner(s: *State) callconv(.C) c_int {
+                    return @call(.always_inline, f, .{s});
+                }
+            }.inner;
+        },
+        .void => |_| {
+            _ = @as(ZigFnVoid, f);
+            return struct {
+                fn inner(s: *State) callconv(.C) c_int {
+                    @call(.always_inline, f, .{s});
+                    return 0;
+                }
+            }.inner;
+        },
+        .error_union => |_| {
+            _ = @as(ZigFnErrorSet, f);
+            return struct {
+                fn inner(s: *State) callconv(.C) c_int {
+                    if (@call(.always_inline, f, .{s})) |res|
+                        return res
+                    else |err| switch (@as(anyerror, @errorCast(err))) {
+                        error.RaiseLuauError => s.err(),
+                        else => s.errStr("{s}", .{@errorName(err)}),
+                    }
+                }
+            }.inner;
+        },
+        else => @compileError("Unsupported Fn Return type"),
+    }
+}
+
+pub fn toCFn(comptime f: anytype) CFunction {
+    const t = @TypeOf(f);
+    const ti = @typeInfo(t);
+    switch (ti) {
+        .@"fn" => |Fn| return zigToCFn(Fn, f),
+        .pointer => |ptr| {
+            // *const fn ...
+            if (!ptr.is_const)
+                @compileError("Pointer must be constant");
+            const pi = @typeInfo(ptr.child);
+            switch (pi) {
+                .@"fn" => |Fn| return zigToCFn(Fn, f),
+                else => @compileError("Pointer must be a pointer to a function"),
+            }
+        },
+        else => @compileError("zig_fn must be a Fn or a Fn Pointer"),
+    }
+    @compileError("Could not determine zig_fn type");
+}
 
 comptime {
     std.testing.refAllDeclsRecursive(@This());
@@ -665,7 +849,7 @@ comptime {
 test "loading code" {
     const testing_allocator = std.testing.allocator;
 
-    var l = State.init(&testing_allocator);
+    var l = try State.init(&testing_allocator);
     defer l.deinit();
 
     const code =
@@ -685,16 +869,18 @@ test "loading code" {
     const compiled = try compiler.compileParseResult(testing_allocator, parse_result, ast_name_table, null);
     defer testing_allocator.free(compiled);
 
-    const err = l.load(chunkname, compiled);
-    try std.testing.expect(err == 0);
+    const ok = l.load(chunkname, compiled);
+    try std.testing.expect(ok);
 
     l.call(0, 1);
 
-    const result = l.toIntegerx(.at(-1), null);
-    try std.testing.expect(result == 1);
+    const result = l.toIntegerx(.at(-1));
+    try std.testing.expectEqual(result, 1);
 }
 
 const std = @import("std");
 
 const ast = @import("ast.zig");
 const compiler = @import("compiler.zig");
+
+const raw = @import("luau_raw");

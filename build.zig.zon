@@ -17,6 +17,7 @@
         "src",
         "license",
         "build.zig",
+        "compile_commands.zig",
         "build.zig.zon",
     },
 }

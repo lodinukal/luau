@@ -1242,7 +1242,7 @@ test Node {
                 .stat_local => {
                     const local: *StatLocal = node.cast(.stat_local).?;
                     try std.testing.expectEqualStrings("x", std.mem.span(local.vars.slice()[0].name.value));
-                    std.log.err("{}", .{(local.values.slice()[0].cast(.expr_constant_number).?.value)});
+                    // std.log.err("{}", .{(local.values.slice()[0].cast(.expr_constant_number).?.value)});
                 },
                 else => {},
             }

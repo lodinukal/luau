@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) !void {
     headers.addIncludePath(b.path("VM/include"));
     if (target.result.os.tag != .wasi)
         headers.addIncludePath(b.path("CodeGen/include"));
-    _ = headers.addModule("luau");
+    const luau_raw = headers.addModule("luau_raw");
 
     const lib = if (build_shared) b.addSharedLibrary(.{
         .name = "luau",
@@ -48,7 +48,6 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(lib);
     lib.root_module.pic = true;
-    lib.addIncludePath(b.path("src/Lib"));
     lib.addIncludePath(b.path("Ast/include"));
     lib.addIncludePath(b.path("Common/include"));
     lib.addIncludePath(b.path("Compiler/include"));
@@ -57,8 +56,8 @@ pub fn build(b: *std.Build) !void {
         lib.addIncludePath(b.path("CodeGen/include"));
     }
     lib.addIncludePath(b.path("VM/include"));
+    lib.addIncludePath(b.path("src/"));
     lib.addIncludePath(b.path("VM/src"));
-    lib.addIncludePath(b.path(""));
 
     const api = api: {
         if (!build_shared) break :api "extern \"C\"";
@@ -69,28 +68,73 @@ pub fn build(b: *std.Build) !void {
     };
 
     const cpp_version = "c++17";
-    const FLAGS = [_][]const u8{
-        // setjmp.h compile error in Wasm
+
+    var flags: std.ArrayList([]const u8) = .init(b.allocator);
+    try flags.appendSlice(&.{
         "-DLUA_USE_LONGJMP=" ++ if (!is_wasm) "1" else "0",
         b.fmt("-DLUA_API={s}", .{api}),
         b.fmt("-DLUACODE_API={s}", .{api}),
         b.fmt("-DLUACODEGEN_API={s}", .{api}),
-        if (use_4_vector) "-DLUA_VECTOR_SIZE=4" else "",
-        if (is_wasm) "-fexceptions" else "",
-        if (is_wasm) b.fmt("-DLUAU_WASM_ENV_NAME=\"{s}\"", .{wasm_env_name}) else "",
         "-std=" ++ cpp_version,
-    };
+    });
+
+    if (is_wasm) {
+        try flags.appendSlice(&.{
+            "-fexceptions",
+            b.fmt("-DLUAU_WASM_ENV_NAME=\"{s}\"", .{wasm_env_name}),
+        });
+        lib.addCSourceFile(.{
+            .file = b.path("src/luau_web_eh.cpp"),
+            .language = .cpp,
+            .flags = flags.items,
+        });
+    }
+
     lib.linkLibC();
     lib.linkLibCpp();
-    lib.addCSourceFile(.{ .file = b.path("src/luau.cpp"), .flags = &FLAGS });
-    lib.addCSourceFile(.{ .file = b.path("src/Ast.cpp"), .flags = &FLAGS });
-    lib.addCSourceFile(.{ .file = b.path("src/Compiler.cpp"), .flags = &FLAGS });
+    lib.root_module.addCMacro("LUAU_HAS_PRELUDE", "");
+    lib.addCSourceFiles(.{
+        .files = ast_sources,
+        .language = .cpp,
+        .flags = flags.items,
+        .root = b.path("Ast/src/"),
+    });
+    lib.addCSourceFiles(.{
+        .files = compiler_sources,
+        .language = .cpp,
+        .flags = flags.items,
+        .root = b.path("Compiler/src"),
+    });
+    lib.addCSourceFiles(.{
+        .files = compiler_sources,
+        .language = .cpp,
+        .flags = flags.items,
+        .root = b.path("Compiler/src"),
+    });
 
-    lib.installHeader(b.path("VM/include/lua.h"), "lua.h");
-    lib.installHeader(b.path("VM/include/lualib.h"), "lualib.h");
-    lib.installHeader(b.path("VM/include/luaconf.h"), "luaconf.h");
-    if (has_code_gen)
-        lib.installHeader(b.path("CodeGen/include/luacodegen.h"), "luacodegen.h");
+    if (has_code_gen) {
+        lib.addCSourceFiles(.{
+            .files = codegen_sources,
+            .language = .cpp,
+            .flags = flags.items,
+            .root = b.path("CodeGen/src"),
+        });
+    }
+
+    lib.addCSourceFiles(.{
+        .files = vm_sources,
+        .language = .cpp,
+        .flags = flags.items,
+        .root = b.path("VM/src"),
+    });
+
+    {
+        lib.installHeader(b.path("VM/include/lua.h"), "lua.h");
+        lib.installHeader(b.path("VM/include/lualib.h"), "lualib.h");
+        lib.installHeader(b.path("VM/include/luaconf.h"), "luaconf.h");
+        if (has_code_gen)
+            lib.installHeader(b.path("CodeGen/include/luacodegen.h"), "luacodegen.h");
+    }
 
     lib.installHeader(b.path("Compiler/include/luacode.h"), "luacode.h");
 
@@ -102,8 +146,28 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .root_source_file = b.path("src/root.zig"),
     });
+    mod.pic = true;
     mod.linkLibrary(lib);
-    mod.sanitize_c = false;
+    mod.addImport("luau_raw", luau_raw);
+    mod.addCSourceFiles(.{
+        .files = &.{
+            "Ast.cpp",
+            "Compiler.cpp",
+        },
+        .flags = flags.items,
+        .language = .cpp,
+        .root = b.path("src/"),
+    });
+    mod.addIncludePath(b.path("Ast/include"));
+    mod.addIncludePath(b.path("Common/include"));
+    mod.addIncludePath(b.path("Compiler/include"));
+    // CodeGen is not supported on WASM
+    if (has_code_gen) {
+        mod.addIncludePath(b.path("CodeGen/include"));
+    }
+    mod.addIncludePath(b.path("VM/include"));
+    mod.addIncludePath(b.path("src/"));
+    mod.addIncludePath(b.path("VM/src"));
 
     const mod_test = b.addTest(.{
         .root_module = mod,
@@ -115,6 +179,106 @@ pub fn build(b: *std.Build) !void {
 }
 
 pub const wasm_module_export_symbols: []const []const u8 = &.{
-    "zig_luau_try_impl",
-    "zig_luau_catch_impl",
+    "luau_try_impl",
+    "luau_catch_impl",
+};
+
+const ast_sources: []const []const u8 = &.{
+    "Allocator.cpp",
+    "Ast.cpp",
+    "Confusables.cpp",
+    "Cst.cpp",
+    "Lexer.cpp",
+    "Location.cpp",
+    "Parser.cpp",
+    "StringUtils.cpp",
+    "TimeTrace.cpp",
+};
+
+const compiler_sources: []const []const u8 = &.{
+    "BytecodeBuilder.cpp",
+    "Compiler.cpp",
+    "Builtins.cpp",
+    "BuiltinFolding.cpp",
+    "ConstantFolding.cpp",
+    "CostModel.cpp",
+    "TableShape.cpp",
+    "Types.cpp",
+    "ValueTracking.cpp",
+    "lcode.cpp",
+};
+
+const codegen_sources: []const []const u8 = &.{
+    "AssemblyBuilderA64.cpp",
+    "AssemblyBuilderX64.cpp",
+    "CodeAllocator.cpp",
+    "CodeBlockUnwind.cpp",
+    "CodeGen.cpp",
+    "CodeGenAssembly.cpp",
+    "CodeGenContext.cpp",
+    "CodeGenUtils.cpp",
+    "CodeGenA64.cpp",
+    "CodeGenX64.cpp",
+    "EmitBuiltinsX64.cpp",
+    "EmitCommonX64.cpp",
+    "EmitInstructionX64.cpp",
+    "IrAnalysis.cpp",
+    "IrBuilder.cpp",
+    "IrCallWrapperX64.cpp",
+    "IrDump.cpp",
+    "IrLoweringA64.cpp",
+    "IrLoweringX64.cpp",
+    "IrRegAllocA64.cpp",
+    "IrRegAllocX64.cpp",
+    "IrTranslateBuiltins.cpp",
+    "IrTranslation.cpp",
+    "IrUtils.cpp",
+    "IrValueLocationTracking.cpp",
+    "lcodegen.cpp",
+    "NativeProtoExecData.cpp",
+    "NativeState.cpp",
+    "OptimizeConstProp.cpp",
+    "OptimizeDeadStore.cpp",
+    "OptimizeFinalX64.cpp",
+    "UnwindBuilderDwarf2.cpp",
+    "UnwindBuilderWin.cpp",
+    "BytecodeAnalysis.cpp",
+    "BytecodeSummary.cpp",
+    "SharedCodeAllocator.cpp",
+};
+
+const vm_sources: []const []const u8 = &.{
+    "lapi.cpp",
+    "laux.cpp",
+    "lbaselib.cpp",
+    "lbitlib.cpp",
+    "lbuffer.cpp",
+    "lbuflib.cpp",
+    "lbuiltins.cpp",
+    "lcorolib.cpp",
+    "ldblib.cpp",
+    "ldebug.cpp",
+    "ldo.cpp",
+    "lfunc.cpp",
+    "lgc.cpp",
+    "lgcdebug.cpp",
+    "linit.cpp",
+    "lmathlib.cpp",
+    "lmem.cpp",
+    "lnumprint.cpp",
+    "lobject.cpp",
+    "loslib.cpp",
+    "lperf.cpp",
+    "lstate.cpp",
+    "lstring.cpp",
+    "lstrlib.cpp",
+    "ltable.cpp",
+    "ltablib.cpp",
+    "ltm.cpp",
+    "ludata.cpp",
+    "lutf8lib.cpp",
+    "lveclib.cpp",
+    "lvmexecute.cpp",
+    "lvmload.cpp",
+    "lvmutils.cpp",
 };

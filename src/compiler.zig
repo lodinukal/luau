@@ -73,3 +73,46 @@ test compileParseResult {
     try std.testing.expect(bytes[0] == 0);
     try std.testing.expectEqualStrings(bytes[1..], ":4: Expected identifier when parsing expression, got <eof>");
 }
+
+/// when freeing this, free raw_bytes
+pub const CompileResult = struct {
+    ok: bool,
+    bytes: []const u8,
+    raw_bytes: []const u8,
+
+    pub fn deinit(self: CompileResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.raw_bytes);
+    }
+};
+
+pub fn compile(
+    allocator: std.mem.Allocator,
+    temp_allocator: std.mem.Allocator,
+    source: []const u8,
+    options: CompileOptions,
+) error{OutOfMemory}!CompileResult {
+    const const_ref_temp_allocator = temp_allocator;
+    var luau_allocator = ast.Allocator.init(&const_ref_temp_allocator);
+    defer luau_allocator.deinit();
+
+    var name_table = ast.NameTable.init(luau_allocator);
+    defer name_table.deinit();
+
+    var parse_result = ast.parse(source, name_table, luau_allocator);
+    defer parse_result.deinit();
+
+    const bytes = try compileParseResult(allocator, parse_result, name_table, options);
+    // means there was a compile error
+    if (bytes[0] == 0) {
+        return .{
+            .ok = false,
+            .bytes = bytes[1..],
+            .raw_bytes = bytes,
+        };
+    }
+    return .{
+        .ok = true,
+        .bytes = bytes,
+        .raw_bytes = bytes,
+    };
+}
