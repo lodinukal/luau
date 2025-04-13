@@ -1,7 +1,7 @@
 .{
     .name = "luau",
-    .version = "0.662.0",
-    .minimum_zig_version = "0.14.0-dev.3286+05d8b565a",
+    .version = "0.669.0",
+    .minimum_zig_version = "0.14.0",
     .dependencies = .{},
     .paths = .{
         "Analysis",
@@ -12,6 +12,7 @@
         "Config",
         "extern",
         "fuzz",
+        "Require",
         "VM",
 
         "src",
