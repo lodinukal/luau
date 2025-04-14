@@ -6,7 +6,7 @@ const LUAU_VERSION: std.SemanticVersion = .{ .major = 0, .minor = 669, .patch = 
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
+    const optimize = b.standardOptimizeOption(.{});
 
     const use_4_vector = b.option(bool, "use 4 vector", "Build Luau to use 4-vectors instead of the default 3-vector.") orelse false;
     const wasm_env_name = b.option([]const u8, "wasm_env", "The environment to import symbols from when building for WebAssembly. Defaults to `env`") orelse "env";
