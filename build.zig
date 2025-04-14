@@ -35,16 +35,14 @@ pub fn build(b: *std.Build) !void {
         headers.addIncludePath(b.path("CodeGen/include"));
     const luau_raw = headers.addModule("luau_raw");
 
-    const lib = if (build_shared) b.addSharedLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "luau",
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
         .version = LUAU_VERSION,
-    }) else b.addStaticLibrary(.{
-        .name = "luau",
-        .target = target,
-        .optimize = optimize,
-        .version = LUAU_VERSION,
+        .linkage = if (build_shared) .dynamic else .static,
     });
     b.installArtifact(lib);
     lib.root_module.pic = true;

@@ -1,7 +1,8 @@
 .{
-    .name = "luau",
+    .name = .luau,
     .version = "0.669.0",
     .minimum_zig_version = "0.14.0",
+    .fingerprint = 0x5e07e249f4c12649,
     .dependencies = .{},
     .paths = .{
         "Analysis",
