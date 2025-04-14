@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) !void {
     lib.addIncludePath(b.path("src/"));
     lib.addIncludePath(b.path("VM/src"));
 
-    const api = api: {
+    const api: ?[]const u8 = api: {
         if (!build_shared) break :api "extern \"C\"";
         switch (target.result.os.tag) {
             .windows => break :api "extern \"C\" __declspec(dllexport)",
@@ -68,11 +68,15 @@ pub fn build(b: *std.Build) !void {
     const cpp_version = "c++17";
 
     var flags: std.ArrayList([]const u8) = .init(b.allocator);
+    if (api) |got_api| {
+        try flags.appendSlice(&.{
+            b.fmt("-DLUA_API={s}", .{got_api}),
+            b.fmt("-DLUACODE_API={s}", .{got_api}),
+            b.fmt("-DLUACODEGEN_API={s}", .{got_api}),
+        });
+    }
     try flags.appendSlice(&.{
         "-DLUA_USE_LONGJMP=" ++ if (!is_wasm) "1" else "0",
-        b.fmt("-DLUA_API={s}", .{api}),
-        b.fmt("-DLUACODE_API={s}", .{api}),
-        b.fmt("-DLUACODEGEN_API={s}", .{api}),
         "-std=" ++ cpp_version,
     });
 
@@ -144,12 +148,11 @@ pub fn build(b: *std.Build) !void {
         lib.installHeader(b.path("VM/include/luaconf.h"), "luaconf.h");
         if (has_code_gen)
             lib.installHeader(b.path("CodeGen/include/luacodegen.h"), "luacodegen.h");
+        lib.installHeader(b.path("Compiler/include/luacode.h"), "luacode.h");
     }
 
-    lib.installHeader(b.path("Compiler/include/luacode.h"), "luacode.h");
-
-    const step = compile_commands.createStep(b, "cdb", &.{lib});
-    b.getInstallStep().dependOn(step);
+    // const step = compile_commands.createStep(b, "cdb", &.{lib});
+    // b.getInstallStep().dependOn(step);
 
     const mod = b.addModule("luau", .{
         .target = target,
