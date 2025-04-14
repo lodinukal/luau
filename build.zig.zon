@@ -6,6 +6,7 @@
     .paths = .{
         "Analysis",
         "Ast",
+        "CLI",
         "CodeGen",
         "Common",
         "Compiler",
