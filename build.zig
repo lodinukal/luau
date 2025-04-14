@@ -126,6 +126,18 @@ pub fn build(b: *std.Build) !void {
         .root = b.path("VM/src"),
     });
 
+    lib.installHeadersDirectory(b.path("Analysis/include"), "", .{});
+    lib.installHeadersDirectory(b.path("Ast/include"), "", .{});
+    lib.installHeadersDirectory(b.path("CLI/include"), "", .{});
+    lib.installHeadersDirectory(b.path("CodeGen/include"), "", .{});
+    lib.installHeadersDirectory(b.path("Common/include"), "", .{});
+    lib.installHeadersDirectory(b.path("Compiler/include"), "", .{});
+    lib.installHeadersDirectory(b.path("Config/include"), "", .{});
+    lib.installHeadersDirectory(b.path("EqSat/include"), "", .{});
+    lib.installHeadersDirectory(b.path("Require/Navigator/include"), "", .{});
+    lib.installHeadersDirectory(b.path("Require/Runtime/include"), "", .{});
+    lib.installHeadersDirectory(b.path("VM/include"), "", .{});
+
     {
         lib.installHeader(b.path("VM/include/lua.h"), "lua.h");
         lib.installHeader(b.path("VM/include/lualib.h"), "lualib.h");
