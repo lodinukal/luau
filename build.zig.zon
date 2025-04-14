@@ -11,6 +11,7 @@
         "Common",
         "Compiler",
         "Config",
+        "EqSat",
         "extern",
         "fuzz",
         "Require",
