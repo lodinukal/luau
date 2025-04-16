@@ -9,4 +9,6 @@
 #include "luacodegen.h"
 #endif
 
+LUA_API void registerAssertionHandler();
+
 #endif // LUAU_HEADERS

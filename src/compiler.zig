@@ -1,4 +1,5 @@
 const std = @import("std");
+const luau = @import("root.zig");
 const ast = @import("ast.zig");
 
 const c = @cImport({
@@ -50,7 +51,7 @@ pub fn compileParseResult(
 test compileParseResult {
     var allocator = std.testing.allocator;
 
-    const Allocator = ast.Allocator;
+    const Allocator = luau.Allocator;
 
     var a = Allocator.init(&allocator);
     defer a.deinit();
@@ -92,7 +93,7 @@ pub fn compile(
     options: CompileOptions,
 ) error{OutOfMemory}!CompileResult {
     const const_ref_temp_allocator = temp_allocator;
-    var luau_allocator = ast.Allocator.init(&const_ref_temp_allocator);
+    var luau_allocator = luau.Allocator.init(&const_ref_temp_allocator);
     defer luau_allocator.deinit();
 
     var name_table = ast.NameTable.init(luau_allocator);
@@ -115,4 +116,8 @@ pub fn compile(
         .bytes = bytes,
         .raw_bytes = bytes,
     };
+}
+
+comptime {
+    std.testing.refAllDecls(@This());
 }
