@@ -12,6 +12,8 @@ pub fn build(b: *std.Build) !void {
     const wasm_env_name = b.option([]const u8, "wasm_env", "The environment to import symbols from when building for WebAssembly. Defaults to `env`") orelse "env";
     const build_shared = b.option(bool, "build_shared", "Build Luau as a shared library.") orelse false;
 
+    const enable_analysis = b.option(bool, "enable_analysis", "Enable the analysis module (very big).") orelse false;
+
     const is_wasm = target.result.ofmt == .wasm;
     const has_code_gen = !is_wasm;
 
@@ -46,16 +48,23 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(lib);
     lib.root_module.pic = true;
+    lib.addIncludePath(b.path("src/"));
     lib.addIncludePath(b.path("Ast/include"));
     lib.addIncludePath(b.path("Common/include"));
     lib.addIncludePath(b.path("Compiler/include"));
-    // CodeGen is not supported on WASM
+    // // CodeGen is not supported on WASM
     if (has_code_gen) {
         lib.addIncludePath(b.path("CodeGen/include"));
     }
     lib.addIncludePath(b.path("VM/include"));
-    lib.addIncludePath(b.path("src/"));
     lib.addIncludePath(b.path("VM/src"));
+    lib.addIncludePath(b.path("Require/Navigator/include"));
+    lib.addIncludePath(b.path("Require/Runtime/include"));
+    if (enable_analysis) {
+        lib.addIncludePath(b.path("EqSat/include"));
+        lib.addIncludePath(b.path("Analysis/include"));
+    }
+    lib.addIncludePath(b.path("Config/include"));
 
     const api: ?[]const u8 = api: {
         if (!build_shared) break :api "extern \"C\"";
@@ -107,11 +116,37 @@ pub fn build(b: *std.Build) !void {
         .flags = flags.items,
         .root = b.path("Compiler/src"),
     });
+    if (enable_analysis) {
+        lib.addCSourceFiles(.{
+            .files = analysis_sources,
+            .language = .cpp,
+            .flags = flags.items,
+            .root = b.path("Analysis/src"),
+        });
+        lib.addCSourceFiles(.{
+            .files = eqsat_sources,
+            .language = .cpp,
+            .flags = flags.items,
+            .root = b.path("EqSat/src"),
+        });
+    }
     lib.addCSourceFiles(.{
-        .files = compiler_sources,
+        .files = config_sources,
         .language = .cpp,
         .flags = flags.items,
-        .root = b.path("Compiler/src"),
+        .root = b.path("Config/src"),
+    });
+    lib.addCSourceFiles(.{
+        .files = require_navigator_sources,
+        .language = .cpp,
+        .flags = flags.items,
+        .root = b.path("Require/Navigator/src"),
+    });
+    lib.addCSourceFiles(.{
+        .files = require_runtime_sources,
+        .language = .cpp,
+        .flags = flags.items,
+        .root = b.path("Require/Runtime/src"),
     });
 
     if (has_code_gen) {
@@ -133,7 +168,9 @@ pub fn build(b: *std.Build) !void {
     lib.installHeadersDirectory(b.path("Analysis/include"), "", .{});
     lib.installHeadersDirectory(b.path("Ast/include"), "", .{});
     lib.installHeadersDirectory(b.path("CLI/include"), "", .{});
-    lib.installHeadersDirectory(b.path("CodeGen/include"), "", .{});
+    if (has_code_gen) {
+        lib.installHeadersDirectory(b.path("CodeGen/include"), "", .{});
+    }
     lib.installHeadersDirectory(b.path("Common/include"), "", .{});
     lib.installHeadersDirectory(b.path("Compiler/include"), "", .{});
     lib.installHeadersDirectory(b.path("Config/include"), "", .{});
@@ -166,21 +203,13 @@ pub fn build(b: *std.Build) !void {
         .files = &.{
             "Ast.cpp",
             "Compiler.cpp",
+            "Assert.cpp",
         },
         .flags = flags.items,
         .language = .cpp,
         .root = b.path("src/"),
     });
-    mod.addIncludePath(b.path("Ast/include"));
-    mod.addIncludePath(b.path("Common/include"));
-    mod.addIncludePath(b.path("Compiler/include"));
-    // CodeGen is not supported on WASM
-    if (has_code_gen) {
-        mod.addIncludePath(b.path("CodeGen/include"));
-    }
-    mod.addIncludePath(b.path("VM/include"));
     mod.addIncludePath(b.path("src/"));
-    mod.addIncludePath(b.path("VM/src"));
 
     const mod_test = b.addTest(.{
         .root_module = mod,
@@ -294,4 +323,93 @@ const vm_sources: []const []const u8 = &.{
     "lvmexecute.cpp",
     "lvmload.cpp",
     "lvmutils.cpp",
+};
+
+const analysis_sources: []const []const u8 = &.{
+    "Anyification.cpp",
+    "ApplyTypeFunction.cpp",
+    "AstJsonEncoder.cpp",
+    "AstQuery.cpp",
+    "Autocomplete.cpp",
+    "AutocompleteCore.cpp",
+    "BuiltinDefinitions.cpp",
+    "Clone.cpp",
+    "Constraint.cpp",
+    "ConstraintGenerator.cpp",
+    "ConstraintSolver.cpp",
+    "DataFlowGraph.cpp",
+    "DcrLogger.cpp",
+    "Def.cpp",
+    "Differ.cpp",
+    "EmbeddedBuiltinDefinitions.cpp",
+    "Error.cpp",
+    "EqSatSimplification.cpp",
+    "FileResolver.cpp",
+    "FragmentAutocomplete.cpp",
+    "Frontend.cpp",
+    "Generalization.cpp",
+    "GlobalTypes.cpp",
+    "InferPolarity.cpp",
+    "Instantiation.cpp",
+    "Instantiation2.cpp",
+    "IostreamHelpers.cpp",
+    "JsonEmitter.cpp",
+    "Linter.cpp",
+    "LValue.cpp",
+    "Module.cpp",
+    "NonStrictTypeChecker.cpp",
+    "Normalize.cpp",
+    "OverloadResolution.cpp",
+    "Quantify.cpp",
+    "Refinement.cpp",
+    "RequireTracer.cpp",
+    "Scope.cpp",
+    "Simplify.cpp",
+    "Substitution.cpp",
+    "Subtyping.cpp",
+    "Symbol.cpp",
+    "TableLiteralInference.cpp",
+    "ToDot.cpp",
+    "TopoSortStatements.cpp",
+    "ToString.cpp",
+    "Transpiler.cpp",
+    "TxnLog.cpp",
+    "Type.cpp",
+    "TypeArena.cpp",
+    "TypeAttach.cpp",
+    "TypeChecker2.cpp",
+    "TypedAllocator.cpp",
+    "TypeFunction.cpp",
+    "TypeFunctionReductionGuesser.cpp",
+    "TypeFunctionRuntime.cpp",
+    "TypeFunctionRuntimeBuilder.cpp",
+    "TypeInfer.cpp",
+    "TypeOrPack.cpp",
+    "TypePack.cpp",
+    "TypePath.cpp",
+    "TypeUtils.cpp",
+    "Unifiable.cpp",
+    "Unifier.cpp",
+    "Unifier2.cpp",
+};
+
+const config_sources: []const []const u8 = &.{
+    "LinterConfig.cpp",
+    "Config.cpp",
+};
+
+const eqsat_sources: []const []const u8 = &.{
+    "Id.cpp",
+    "UnionFind.cpp",
+};
+
+const require_navigator_sources: []const []const u8 = &.{
+    "PathUtilities.cpp",
+    "RequireNavigator.cpp",
+};
+
+const require_runtime_sources: []const []const u8 = &.{
+    "Navigation.cpp",
+    "Require.cpp",
+    "RequireImpl.cpp",
 };
