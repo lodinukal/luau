@@ -1,66 +1,12 @@
 const std = @import("std");
 
-const ALIGNMENT = 8;
+const luau = @import("root.zig");
 
-pub const CVTable = extern struct {
-    allocate: *const fn (*anyopaque, usize) callconv(.c) ?*align(ALIGNMENT) anyopaque,
-    deallocate: *const fn (*anyopaque, ?*align(ALIGNMENT) anyopaque) callconv(.c) void,
-
-    fn zigAllocate(context: *anyopaque, size: usize) callconv(.c) ?*align(ALIGNMENT) anyopaque {
-        const as_allocator: *std.mem.Allocator = @ptrCast(@alignCast(context));
-        const bytes = as_allocator.alignedAlloc(u8, 8, size + 8) catch return null;
-        std.mem.writeInt(usize, bytes[0..@sizeOf(usize)], size, .little);
-        return (bytes[8..]).ptr;
-        // return null;
-    }
-
-    fn zigDeallocate(context: *anyopaque, ptr: ?*align(ALIGNMENT) anyopaque) callconv(.c) void {
-        const as_allocator: *std.mem.Allocator = @ptrCast(@alignCast(context));
-        if (ptr) |p| {
-            var bytes_shifted: [*:0]align(ALIGNMENT) u8 = @ptrCast(p);
-            bytes_shifted -= 8;
-            const size = std.mem.readInt(usize, bytes_shifted[0..@sizeOf(usize)], .little);
-            as_allocator.free(bytes_shifted[0 .. size + 8]);
-        }
-    }
-};
-
-pub const vtable: CVTable = .{
-    .allocate = CVTable.zigAllocate,
-    .deallocate = CVTable.zigDeallocate,
-};
-
-extern fn Luau_Ast_Allocator_new(ctx: *anyopaque, vtable: CVTable) callconv(.c) *Allocator;
-extern fn Luau_Ast_Allocator_default() callconv(.c) *Allocator;
-extern fn Luau_Ast_Allocator_free(*Allocator) callconv(.c) void;
-
-pub const Allocator = opaque {
-    // a bit hacky but ok
-    pub inline fn init(allocator: *const std.mem.Allocator) *Allocator {
-        const ctx: *anyopaque = @constCast(@ptrCast(allocator));
-        return Luau_Ast_Allocator_new(ctx, vtable);
-    }
-
-    pub inline fn default() *Allocator {
-        return Luau_Ast_Allocator_default();
-    }
-
-    pub inline fn deinit(allocator: *Allocator) void {
-        Luau_Ast_Allocator_free(allocator);
-    }
-};
-
-test Allocator {
-    var allocator = std.testing.allocator;
-    const a = Allocator.init(&allocator);
-    defer a.deinit();
-}
-
-extern "c" fn Luau_Ast_Lexer_AstNameTable_new(*Allocator) *NameTable;
+extern "c" fn Luau_Ast_Lexer_AstNameTable_new(*luau.Allocator) *NameTable;
 extern "c" fn Luau_Ast_Lexer_AstNameTable_free(*NameTable) void;
 
 pub const NameTable = opaque {
-    pub inline fn init(allocator: *Allocator) *NameTable {
+    pub inline fn init(allocator: *luau.Allocator) *NameTable {
         return Luau_Ast_Lexer_AstNameTable_new(allocator);
     }
 
@@ -71,7 +17,7 @@ pub const NameTable = opaque {
 
 test NameTable {
     var allocator = std.testing.allocator;
-    var a = Allocator.init(&allocator);
+    var a = luau.Allocator.init(&allocator);
     defer a.deinit();
 
     var table = NameTable.init(a);
@@ -111,7 +57,7 @@ const zig_ParseResult_Errors = extern struct {
     size: usize,
 };
 
-extern fn Luau_Ast_Parser_parse([*]const u8, usize, *NameTable, *Allocator) callconv(.c) *ParseResult;
+extern fn Luau_Ast_Parser_parse([*]const u8, usize, *NameTable, *luau.Allocator) callconv(.c) *ParseResult;
 extern fn Luau_Ast_ParseResult_free(*ParseResult) callconv(.c) void;
 extern fn Luau_Ast_ParseResult_get_root(*ParseResult) callconv(.c) *Node;
 extern fn Luau_Ast_ParseResult_get_hotcomments(*ParseResult) callconv(.c) zig_ParseResult_HotComments;
@@ -120,7 +66,7 @@ extern fn Luau_Ast_ParseResult_get_errors(*ParseResult) callconv(.c) zig_ParseRe
 extern fn Luau_Ast_ParseResult_free_errors(zig_ParseResult_Errors) callconv(.c) void;
 extern fn Luau_Ast_ParseResult_hasNativeFunction(*ParseResult) callconv(.c) bool;
 
-pub fn parse(source: []const u8, table: *NameTable, allocator: *Allocator) *ParseResult {
+pub fn parse(source: []const u8, table: *NameTable, allocator: *luau.Allocator) *ParseResult {
     return Luau_Ast_Parser_parse(
         source.ptr,
         source.len,
@@ -225,7 +171,7 @@ test ParseResult {
     var allocator = std.testing.allocator;
 
     {
-        var a = Allocator.init(&allocator);
+        var a = luau.Allocator.init(&allocator);
         defer a.deinit();
 
         var table = NameTable.init(a);
@@ -269,7 +215,7 @@ test ParseResult {
         }
     }
     {
-        var a = Allocator.init(&allocator);
+        var a = luau.Allocator.init(&allocator);
         defer a.deinit();
 
         var table = NameTable.init(a);
@@ -295,10 +241,10 @@ pub const Name = extern struct {
 pub const Local = extern struct {
     name: Name,
     location: Location,
-    shadow: [*c]Local,
+    shadow: ?*Local,
     functionDepth: usize,
     loopDepth: usize,
-    annotation: [*c]Node,
+    annotation: ?*Node,
 };
 
 // matches layout of optional for msvc and clang
@@ -329,9 +275,9 @@ pub fn Array(comptime T: type) type {
 }
 
 pub const TypeList = extern struct {
-    types: Array([*c]Node),
+    types: Array(*Node),
     /// Null indicates no tail, not an untyped tail.
-    tailType: [*c]Node = null,
+    tailType: ?*Node = null,
 };
 
 pub const Node = extern struct {
@@ -387,6 +333,7 @@ pub const Node = extern struct {
         type_table,
         type_function,
         type_typeof,
+        type_optional,
         type_union,
         type_intersection,
         expr_error,
@@ -447,6 +394,7 @@ pub const Node = extern struct {
                 .type_table => TypeTable,
                 .type_function => TypeFunction,
                 .type_typeof => TypeTypeof,
+                .type_optional => TypeOptional,
                 .type_union => TypeUnion,
                 .type_intersection => TypeIntersection,
                 .expr_error => ExprError,
@@ -484,6 +432,7 @@ pub const Attr = extern struct {
     pub const Kind = enum(c_int) {
         checked = 0,
         native = 1,
+        deprecated = 2,
     };
 };
 
@@ -494,7 +443,7 @@ pub const GenericType = extern struct {
     location: Location,
 
     name: Name,
-    defaultValue: [*c]Node = null,
+    defaultValue: ?*Node = null,
 };
 
 pub const GenericTypePack = extern struct {
@@ -504,7 +453,7 @@ pub const GenericTypePack = extern struct {
     location: Location,
 
     name: Name,
-    defaultValue: [*c]Node = null,
+    defaultValue: ?*Node = null,
 };
 
 pub const ExprGroup = extern struct {
@@ -513,7 +462,7 @@ pub const ExprGroup = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    expr: [*c]Node,
+    expr: ?*Node,
 };
 
 pub const ExprConstantNil = extern struct {
@@ -572,7 +521,7 @@ pub const ExprLocal = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    local: [*c]Local,
+    local: *Local,
     upvalue: bool,
 };
 
@@ -598,8 +547,8 @@ pub const ExprCall = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    func: [*c]Node,
-    args: Array([*c]Node),
+    func: *Node,
+    args: Array(*Node),
     self: bool,
     argLocation: Location,
 };
@@ -610,7 +559,7 @@ pub const ExprIndexName = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    expr: [*c]Node,
+    expr: *Node,
     index: Name,
     indexLocation: Location,
     opPosition: Position,
@@ -623,8 +572,8 @@ pub const ExprIndexExpr = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    expr: [*c]Node,
-    index: [*c]Node,
+    expr: *Node,
+    index: *Node,
 };
 
 pub const ExprFunction = extern struct {
@@ -633,16 +582,16 @@ pub const ExprFunction = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    attributes: Array([*c]Attr),
-    generics: Array([*c]GenericType),
-    genericPacks: Array([*c]GenericTypePack),
-    self: [*c]Local,
-    args: Array([*c]Local),
+    attributes: Array(*Attr),
+    generics: Array(*GenericType),
+    genericPacks: Array(*GenericTypePack),
+    self: *Local,
+    args: Array(*Local),
     returnAnnotation: Optional(TypeList),
     vararg: bool = false,
     varargLocation: Location,
-    varargAnnotation: [*c]Node,
-    body: [*c]StatBlock,
+    varargAnnotation: *Node,
+    body: *StatBlock,
     functionDepth: usize,
     debugname: Name,
     argLocation: Optional(Location),
@@ -657,20 +606,16 @@ pub const ExprTable = extern struct {
     items: Array(Item),
 
     pub const Item = extern struct {
-        pub const Kind = extern struct {
-            bits: c_int = 0,
-
-            /// foo, in which case key is a nullptr
-            pub const List: Kind = .{ .bits = 0 };
-            /// foo=bar, in which case key is a ExprConstantString
-            pub const Record: Kind = .{ .bits = 1 };
+        pub const Kind = enum(u32) {
+            /// foo
+            List = 0,
+            /// foo=bar
+            Record = 1,
             /// [foo]=bar
-            pub const General: Kind = .{ .bits = 2 };
-
-            // pub usingnamespace cpp.FlagsMixin(Kind);
+            General = 2,
         };
 
-        kind: Node.Kind,
+        kind: Kind,
         /// can be nullptr!
         key: ?*Node,
         value: *Node,
@@ -684,7 +629,7 @@ pub const ExprUnary = extern struct {
     location: Location,
 
     op: Op,
-    expr: [*c]Node,
+    expr: *Node,
 
     pub const Op = enum(c_int) {
         Not = 0,
@@ -700,8 +645,8 @@ pub const ExprBinary = extern struct {
     location: Location,
 
     op: Op,
-    left: [*c]Node,
-    right: [*c]Node,
+    left: *Node,
+    right: *Node,
 
     pub const Op = enum(c_int) {
         Add = 0,
@@ -720,7 +665,6 @@ pub const ExprBinary = extern struct {
         CompareGe = 13,
         And = 14,
         Or = 15,
-        __Count = 16,
     };
 };
 
@@ -730,8 +674,8 @@ pub const ExprTypeAssertion = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    expr: [*c]Node,
-    annotation: [*c]Node,
+    expr: *Node,
+    annotation: *Node,
 };
 
 pub const ExprIfElse = extern struct {
@@ -740,11 +684,11 @@ pub const ExprIfElse = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    condition: [*c]Node,
+    condition: *Node,
     hasThen: bool,
-    trueExpr: [*c]Node,
+    trueExpr: ?*Node,
     hasElse: bool,
-    falseExpr: [*c]Node,
+    falseExpr: ?*Node,
 };
 
 pub const ExprInterpString = extern struct {
@@ -757,7 +701,7 @@ pub const ExprInterpString = extern struct {
     /// an array of strings for "foo" and "bar", and an array of expressions for "baz".
     /// `strings` will always have one more element than `expressions`.
     strings: Array(Array(u8)),
-    expressions: Array([*c]Node),
+    expressions: Array(*Node),
 };
 
 pub const StatBlock = extern struct {
@@ -787,8 +731,8 @@ pub const StatIf = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    condition: [*c]Node,
-    thenbody: [*c]StatBlock,
+    condition: *Node,
+    thenbody: *StatBlock,
     elsebody: ?*Node,
     thenLocation: Optional(Location),
     /// Active for 'elseif' as well
@@ -802,8 +746,8 @@ pub const StatWhile = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    condition: [*c]Node,
-    body: [*c]StatBlock,
+    condition: *Node,
+    body: *StatBlock,
     hasDo: bool = false,
     doLocation: Location,
 };
@@ -815,8 +759,8 @@ pub const StatRepeat = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    condition: [*c]Node,
-    body: [*c]StatBlock,
+    condition: *Node,
+    body: *StatBlock,
     DEPRECATED_hasUntil: bool = false,
 };
 
@@ -843,7 +787,7 @@ pub const StatReturn = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    list: Array([*c]Node),
+    list: Array(*Node),
 };
 
 pub const StatExpr = extern struct {
@@ -853,7 +797,7 @@ pub const StatExpr = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    expr: [*c]Node,
+    expr: *Node,
 };
 
 pub const StatLocal = extern struct {
@@ -875,11 +819,11 @@ pub const StatFor = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    variable: [*c]Local,
-    from: [*c]Node,
-    to: [*c]Node,
-    step: [*c]Node,
-    body: [*c]StatBlock,
+    variable: *Local,
+    from: *Node,
+    to: *Node,
+    step: ?*Node,
+    body: *StatBlock,
     hasDo: bool = false,
     doLocation: Location,
 };
@@ -891,9 +835,9 @@ pub const StatForIn = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    vars: Array([*c]Local),
-    values: Array([*c]Node),
-    body: [*c]StatBlock,
+    vars: Array(*Local),
+    values: Array(*Node),
+    body: *StatBlock,
     hasIn: bool = false,
     inLocation: Location,
     hasDo: bool = false,
@@ -907,8 +851,8 @@ pub const StatAssign = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    vars: Array([*c]Node),
-    values: Array([*c]Node),
+    vars: Array(*Node),
+    values: Array(*Node),
 };
 
 pub const StatCompoundAssign = extern struct {
@@ -919,8 +863,8 @@ pub const StatCompoundAssign = extern struct {
     MAYBE_hasSemicolon: bool = false,
 
     op: ExprBinary.Op,
-    variable: [*c]Node,
-    value: [*c]Node,
+    variable: *Node,
+    value: *Node,
 };
 
 pub const StatFunction = extern struct {
@@ -930,8 +874,8 @@ pub const StatFunction = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    name: [*c]Node,
-    func: [*c]ExprFunction,
+    name: *Node,
+    func: *ExprFunction,
 };
 
 pub const StatLocalFunction = extern struct {
@@ -941,8 +885,8 @@ pub const StatLocalFunction = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    name: [*c]Local,
-    func: [*c]ExprFunction,
+    name: *Local,
+    func: *ExprFunction,
 };
 
 pub const StatTypeAlias = extern struct {
@@ -954,9 +898,9 @@ pub const StatTypeAlias = extern struct {
 
     name: Name,
     nameLocation: Location,
-    generics: Array([*c]GenericType),
-    genericPacks: Array([*c]GenericTypePack),
-    type: [*c]Node,
+    generics: Array(*GenericType),
+    genericPacks: Array(*GenericTypePack),
+    type: *Node,
     exported: bool,
 };
 
@@ -969,8 +913,9 @@ pub const StatTypeFunction = extern struct {
 
     name: Name,
     nameLocation: Location,
-    body: [*c]ExprFunction,
+    body: *ExprFunction,
     exported: bool,
+    hasErrors: bool,
 };
 
 pub const StatDeclareGlobal = extern struct {
@@ -982,7 +927,7 @@ pub const StatDeclareGlobal = extern struct {
 
     name: Name,
     nameLocation: Location,
-    type: [*c]Node,
+    type: *Node,
 };
 
 pub const ArgumentName = extern struct {
@@ -997,11 +942,11 @@ pub const StatDeclareFunction = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    attributes: Array([*c]Attr),
+    attributes: Array(*Attr),
     name: Name,
     nameLocation: Location,
-    generics: Array([*c]GenericType),
-    genericPacks: Array([*c]GenericTypePack),
+    generics: Array(*GenericType),
+    genericPacks: Array(*GenericTypePack),
     params: TypeList,
     paramNames: Array(ArgumentName),
     vararg: bool = false,
@@ -1012,20 +957,20 @@ pub const StatDeclareFunction = extern struct {
 pub const DeclaredClassProp = extern struct {
     name: Name,
     nameLocation: Location,
-    ty: [*c]Node = null,
+    ty: ?*Node = null,
     isMethod: bool = false,
     location: Location,
 };
 
-pub const TableAccess = enum(c_int) {
+pub const TableAccess = enum(u32) {
     Read = 1,
     Write = 2,
     ReadWrite = 3,
 };
 
 pub const TableIndexer = extern struct {
-    indexType: [*c]Node,
-    resultType: [*c]Node,
+    indexType: *Node,
+    resultType: *Node,
     location: Location,
     access: TableAccess = .ReadWrite,
     accessLocation: Optional(Location),
@@ -1041,13 +986,13 @@ pub const StatDeclareClass = extern struct {
     name: Name,
     superName: Optional(Name),
     props: Array(DeclaredClassProp),
-    indexer: [*c]TableIndexer,
+    indexer: ?*TableIndexer,
 };
 
 /// Don't have Luau::Variant available, it's a bit of an overhead, but a plain struct is nice to use
 pub const TypeOrPack = extern struct {
-    type: [*c]Node = null,
-    typePack: [*c]Node = null,
+    type: ?*Node = null,
+    typePack: ?*Node = null,
 };
 
 pub const TypeReference = extern struct {
@@ -1067,7 +1012,7 @@ pub const TypeReference = extern struct {
 pub const TableProp = extern struct {
     name: Name,
     location: Location,
-    type: [*c]Node,
+    type: *Node,
     access: TableAccess = .ReadWrite,
     accessLocation: Optional(Location),
 };
@@ -1079,7 +1024,7 @@ pub const TypeTable = extern struct {
     location: Location,
 
     props: Array(TableProp),
-    indexer: [*c]TableIndexer,
+    indexer: ?*TableIndexer,
 };
 
 pub const TypeFunction = extern struct {
@@ -1088,9 +1033,9 @@ pub const TypeFunction = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    attributes: Array([*c]Attr),
-    generics: Array([*c]GenericType),
-    genericPacks: Array([*c]GenericTypePack),
+    attributes: Array(*Attr),
+    generics: Array(*GenericType),
+    genericPacks: Array(*GenericTypePack),
     argTypes: TypeList,
     argNames: Array(Optional(ArgumentName)),
     returnTypes: TypeList,
@@ -1102,7 +1047,16 @@ pub const TypeTypeof = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    expr: [*c]Node,
+    expr: *Node,
+};
+
+pub const TypeOptional = extern struct {
+    vtable: *const anyopaque,
+
+    classIndex: Node.Kind,
+    location: Location,
+
+    type: *Node,
 };
 
 pub const TypeUnion = extern struct {
@@ -1111,7 +1065,7 @@ pub const TypeUnion = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    types: Array([*c]Node),
+    types: Array(*Node),
 };
 
 pub const TypeIntersection = extern struct {
@@ -1120,7 +1074,7 @@ pub const TypeIntersection = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    types: Array([*c]Node),
+    types: Array(*Node),
 };
 
 pub const ExprError = extern struct {
@@ -1129,7 +1083,7 @@ pub const ExprError = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    expressions: Array([*c]Node),
+    expressions: Array(*Node),
     messageIndex: c_uint,
 };
 
@@ -1140,8 +1094,8 @@ pub const StatError = extern struct {
     location: Location,
     MAYBE_hasSemicolon: bool = false,
 
-    expressions: Array([*c]Node),
-    statements: Array([*c]Node),
+    expressions: Array(*Node),
+    statements: Array(*Node),
     messageIndex: c_uint,
 };
 
@@ -1151,7 +1105,7 @@ pub const TypeError = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    types: Array([*c]Node),
+    types: Array(*Node),
     isMissing: bool,
     messageIndex: c_uint,
 };
@@ -1180,7 +1134,7 @@ pub const TypeGroup = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    type: [*c]Node,
+    type: *Node,
 };
 
 pub const TypePackExplicit = extern struct {
@@ -1198,7 +1152,7 @@ pub const TypePackVariadic = extern struct {
     classIndex: Node.Kind,
     location: Location,
 
-    variadicType: [*c]Node,
+    variadicType: *Node,
 };
 
 pub const TypePackGeneric = extern struct {
@@ -1214,7 +1168,7 @@ test Node {
     var allocator = std.testing.allocator;
 
     {
-        var a = Allocator.init(&allocator);
+        var a = luau.Allocator.init(&allocator);
         defer a.deinit();
 
         var table = NameTable.init(a);
@@ -1248,4 +1202,8 @@ test Node {
             }
         }
     }
+}
+
+comptime {
+    std.testing.refAllDecls(@This());
 }
