@@ -53,6 +53,10 @@ pub const Index = enum(i32) {
     pub inline fn isPseudo(self: Index) bool {
         return @intFromEnum(self) <= @intFromEnum(Index.registry);
     }
+
+    pub inline fn shift(self: Index, n: i32) Index {
+        return @enumFromInt(@intFromEnum(self) + n);
+    }
 };
 
 pub const Status = enum(u32) {
@@ -139,6 +143,22 @@ pub const Integer = i32;
 pub const Unsigned = u32;
 pub const Vector: type = @Vector(config.vector_size, f32);
 
+pub const Buffer = union(enum) {
+    mutable: []u8,
+    immutable: []const u8,
+
+    pub inline fn literal(buf: []const u8) Buffer {
+        return .{ .immutable = buf };
+    }
+
+    pub fn constSlice(self: Buffer) []const u8 {
+        return switch (self) {
+            .mutable => self.mutable,
+            .immutable => self.immutable,
+        };
+    }
+};
+
 pub const Atom = enum(i32) { _ };
 
 pub const State = opaque {
@@ -151,6 +171,7 @@ pub const State = opaque {
     }
 
     pub inline fn init(a: *const std.mem.Allocator) !*State {
+        raw.registerAssertionHandler();
         return try flua(raw.lua_newstate(alloc, @constCast(a)));
     }
 
@@ -386,10 +407,10 @@ pub const State = opaque {
         return try flua(raw.lua_tothread(tlua(l), @intFromEnum(idx)));
     }
 
-    pub inline fn toBuffer(l: *State, idx: Index) []const u8 {
+    pub inline fn toBuffer(l: *State, idx: Index) Buffer {
         var len: usize = 0;
-        const ptr: [*]const u8 = @ptrCast(raw.lua_tobuffer(tlua(l), @intFromEnum(idx), &len)[0..len] orelse return &.{});
-        return ptr[0..len];
+        const ptr: [*]u8 = @ptrCast(raw.lua_tobuffer(tlua(l), @intFromEnum(idx), &len)[0..len] orelse return &.{});
+        return .{ .mutable = ptr[0..len] };
     }
 
     pub inline fn toPointer(l: *State, idx: Index) ?*const anyopaque {
@@ -499,9 +520,9 @@ pub const State = opaque {
         return raw.lua_newuserdatadtor(tlua(l), sz, dtor);
     }
 
-    pub inline fn newBuffer(l: *State, sz: usize) []u8 {
-        const ptr: [*]u8 = @ptrCast(raw.lua_newbuffer(tlua(l), sz) orelse return &.{});
-        return ptr[0..sz];
+    pub inline fn newBuffer(l: *State, sz: usize) Buffer {
+        const ptr: [*]u8 = @ptrCast(raw.lua_newbuffer(tlua(l), sz) orelse return .literal(""));
+        return .{ .mutable = ptr[0..sz] };
     }
 
     // get functions
@@ -725,6 +746,98 @@ pub const State = opaque {
         l.pushString(name);
         l.call(1, 0);
     }
+
+    // custom helpers
+    pub fn pushVal(l: *State, val: anytype) void {
+        const T = @TypeOf(val);
+        const ti = @typeInfo(T);
+        if (T == []const u8 or T == []u8) {
+            l.pushLengthString(val);
+        } else if (T == [*:0]const u8 or T == [*:0]u8) {
+            l.pushString(val);
+        } else if (T == Vector) {
+            l.pushVector(val);
+        } else if (T == Buffer) {
+            const slice = val.constSlice();
+            const new_buffer = l.newBuffer(slice.len);
+            @memcpy(new_buffer.mutable, slice);
+        } else switch (ti) {
+            .bool => l.pushBoolean(val),
+            .int => |int| {
+                if (int.signedness == .signed) {
+                    l.pushInteger(@intCast(val));
+                } else if (int.signedness == .unsigned) {
+                    l.pushUnsigned(@intCast(val));
+                }
+            },
+            .float => |float| {
+                if (float.bits == 32) {
+                    l.pushNumber(@floatCast(val));
+                } else if (float.bits == 64) {
+                    l.pushNumber(val);
+                } else {
+                    @compileError(std.fmt.comptimePrint("Unsupported float type: {s}", .{@typeName(T)}));
+                }
+            },
+            .pointer => |ptr| {
+                const child_type_info = @typeInfo(ptr.child);
+                const child_is_u8_sentinel_array = child_type_info == .array and
+                    child_type_info.array.sentinel() == 0 and child_type_info.array.child == u8;
+                if (child_is_u8_sentinel_array) {
+                    l.pushString(val);
+                } else if (ptr.size == .slice) {
+                    l.createTable(@intCast(val.len), 0);
+                    for (val, 1..) |v, i| {
+                        l.pushInteger(@intCast(i));
+                        l.pushVal(v);
+                        l.setTable(.at(-3));
+                    }
+                } else {
+                    @compileError(std.fmt.comptimePrint("Unsupported type: {s}", .{@typeName(T)}));
+                }
+            },
+            .optional => |opt| {
+                if (val) |v| {
+                    l.pushVal(@as(opt.child, v));
+                } else {
+                    l.pushNil();
+                }
+            },
+            .@"struct" => {
+                l.createPushTable(val);
+            },
+            else => @compileError(std.fmt.comptimePrint("Unsupported type: {s}", .{@typeName(T)})),
+        }
+    }
+
+    pub fn pushTable(l: *State, index: Index, val: anytype) void {
+        const T = @TypeOf(val);
+        const ti = @typeInfo(T);
+        if (ti != .@"struct") @compileError("pushTable only works with structs, use pushVal for other types");
+
+        if (@hasDecl(T, "luauPushTable")) {
+            const customPushTable: fn (val: T, l: *State, table: Index) void = @field(T, "luauPushTable");
+            customPushTable(val, l, index);
+            return;
+        }
+
+        const fields = ti.@"struct".fields;
+        inline for (fields) |field| {
+            const field_name = field.name;
+            const field_value = @field(val, field_name);
+            l.pushVal(field_value);
+            const old_index: i32 = @intFromEnum(index);
+            // adjusting because this will push the value to the stack
+            // and the index will be incremented
+            const new_index: Index = @enumFromInt(if (old_index < 0) old_index - 1 else old_index);
+            l.setField(new_index, field_name);
+        }
+    }
+
+    pub fn createPushTable(l: *State, val: anytype) void {
+        l.createTable(0, 0);
+        l.pushTable(.at(-1), val);
+    }
 };
 
 pub const OpenLibraries = struct {
@@ -857,7 +970,7 @@ test "loading code" {
     ;
     const chunkname = "test";
 
-    var a = ast.Allocator.init(&testing_allocator);
+    var a = luau.Allocator.init(&testing_allocator);
     defer a.deinit();
 
     var ast_name_table = ast.NameTable.init(a);
@@ -878,8 +991,148 @@ test "loading code" {
     try std.testing.expectEqual(result, 1);
 }
 
+test "State.pushVal" {
+    const testing_allocator = std.testing.allocator;
+
+    var l = try State.init(&testing_allocator);
+    defer l.deinit();
+
+    const test_string = "test";
+    l.pushVal(test_string);
+
+    const result = l.toLengthString(.at(-1));
+    try std.testing.expectEqualSlices(u8, test_string, result);
+
+    const test_number: Number = 1.0;
+    l.pushVal(test_number);
+
+    const result_num = l.toNumberx(.at(-1));
+    try std.testing.expectEqual(test_number, result_num);
+}
+
+test "State.pushTable" {
+    const testing_allocator = std.testing.allocator;
+    var l = try State.init(&testing_allocator);
+    defer l.deinit();
+
+    const code =
+        \\local x = input.x
+        \\local y = input.y
+        \\local z = input.z
+        \\local a = input.a
+        \\local b = input.b
+        \\local c = input.c
+        \\
+        \\assert(typeof(x) == "number")
+        \\assert(typeof(y) == "boolean")
+        \\assert(typeof(z) == "string")
+        \\assert(typeof(a) == "buffer")
+        \\assert(typeof(b) == "nil")
+        \\assert(typeof(c) == "number")
+    ;
+
+    const input: struct {
+        x: i32,
+        y: bool,
+    } = .{
+        .x = 1,
+        .y = true,
+    };
+
+    l.open(.{});
+    // typed table
+    l.createPushTable(input);
+    // anonymous table
+    l.pushTable(.at(-1), .{
+        .z = "test",
+        .a = Buffer.literal(&.{ 0, 10, 10, 10 }),
+        .b = @as(?u8, null),
+        .c = @as(?u8, 1),
+    });
+    l.setGlobal("input");
+
+    const chunkname = "test";
+    var a = luau.Allocator.init(&testing_allocator);
+    defer a.deinit();
+    var ast_name_table = ast.NameTable.init(a);
+    defer ast_name_table.deinit();
+    var parse_result = ast.parse(code, ast_name_table, a);
+    defer parse_result.deinit();
+    const compiled = try compiler.compileParseResult(testing_allocator, parse_result, ast_name_table, null);
+    defer testing_allocator.free(compiled);
+    const ok = l.load(chunkname, compiled);
+    try std.testing.expect(ok);
+
+    try std.testing.expectEqual(.ok, l.pcall(0, 0, .none));
+}
+
+const MyTestTable = struct {
+    helloo: i32 = 1,
+
+    pub fn luauPushTable(self: MyTestTable, l: *State, table: Index) void {
+        l.pushString("test");
+        l.setField(table.shift(-1), "test");
+        l.pushInteger(self.helloo);
+        l.setField(table.shift(-1), "renamed");
+    }
+};
+test "State.pushTable with a custom function" {
+    const testing_allocator = std.testing.allocator;
+    var l = try State.init(&testing_allocator);
+    defer l.deinit();
+
+    l.open(.{});
+
+    const test_table = MyTestTable{
+        .helloo = 5,
+    };
+    l.createPushTable(test_table);
+    l.setGlobal("input");
+
+    const many_tables: []const MyTestTable = &.{
+        MyTestTable{
+            .helloo = 1,
+        },
+        MyTestTable{
+            .helloo = 2,
+        },
+    };
+    l.pushVal(many_tables);
+    l.setGlobal("many_tables");
+
+    const code =
+        \\assert(input.test == "test")
+        \\assert(input.renamed == 5)
+        \\
+        \\assert(typeof(many_tables) == "table")
+        \\
+        \\assert(many_tables[1].test == "test")
+        \\assert(many_tables[1].renamed == 1)
+        \\
+        \\assert(many_tables[2].test == "test")
+        \\assert(many_tables[2].renamed == 2)
+        \\
+        \\assert(many_tables[3] == nil)
+    ;
+
+    const chunkname = "test";
+    var a = luau.Allocator.init(&testing_allocator);
+    defer a.deinit();
+    var ast_name_table = ast.NameTable.init(a);
+    defer ast_name_table.deinit();
+    var parse_result = ast.parse(code, ast_name_table, a);
+    defer parse_result.deinit();
+    const compiled = try compiler.compileParseResult(testing_allocator, parse_result, ast_name_table, null);
+    defer testing_allocator.free(compiled);
+    const ok = l.load(chunkname, compiled);
+    try std.testing.expect(ok);
+
+    try std.testing.expectEqual(.ok, l.pcall(0, 0, .none));
+}
+
 const std = @import("std");
 
+const luau = @import("root.zig");
 const ast = @import("ast.zig");
 const compiler = @import("compiler.zig");
 
