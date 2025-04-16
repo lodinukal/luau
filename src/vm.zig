@@ -623,16 +623,16 @@ pub const State = opaque {
 
     // coroutine functions
 
-    pub inline fn yield(l: *State, nresults: i32) i32 {
-        return raw.lua_yield(tlua(l), nresults);
+    pub inline fn yield(l: *State, nresults: i32) Index {
+        return @enumFromInt(raw.lua_yield(tlua(l), nresults));
     }
 
-    pub inline fn @"break"(l: *State) i32 {
-        return raw.lua_break(tlua(l));
+    pub inline fn @"break"(l: *State) CoroutineStatus {
+        return @enumFromInt(raw.lua_break(tlua(l)));
     }
 
-    pub inline fn @"resume"(l: *State, from: *State, narg: i32) i32 {
-        return raw.lua_resume(tlua(l), tlua(from), narg);
+    pub inline fn @"resume"(l: *State, from: *State, narg: i32) CoroutineStatus {
+        return @enumFromInt(raw.lua_resume(tlua(l), tlua(from), narg));
     }
 
     pub inline fn resumeError(l: *State, from: *State) i32 {
