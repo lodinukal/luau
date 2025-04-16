@@ -741,6 +741,14 @@ pub const State = opaque {
         if (libs.vector) l.require(LUA_VECLIBNAME, @ptrCast(&raw.luaopen_vector));
     }
 
+    pub fn sandbox(l: *State) void {
+        raw.luaL_sandbox(tlua(l));
+    }
+
+    pub fn sandboxThread(l: *State) void {
+        raw.luaL_sandboxthread(tlua(l));
+    }
+
     pub inline fn require(l: *State, name: [:0]const u8, func: CFunction) void {
         l.pushCFunction(func, name);
         l.pushString(name);
