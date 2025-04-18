@@ -202,7 +202,7 @@ pub const State = opaque {
         return try flua(raw.lua_newthread(tlua(l)));
     }
 
-    pub inline fn mainThread(l: *State) *State {
+    pub inline fn mainThread(l: *State) !*State {
         return try flua(raw.lua_mainthread(tlua(l)));
     }
 
