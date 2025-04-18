@@ -58,16 +58,19 @@ static ResolvedRequire resolveRequire(luarequire_Configuration* lrc, lua_State* 
     if (status == Navigator::Status::ErrorReported)
         return {ResolvedRequire::Status::ErrorReported};
 
-    if (!navigationContext.isModulePresent())
-    {
-        luaL_errorL(L, "no module present at resolved path");
-        return ResolvedRequire{ResolvedRequire::Status::ErrorReported};
-    }
+    // MODIFICATION: check against the cache key first before the existence of the module
+    // This is to avoid unnecessary navigation if the module is already cached.
 
     std::optional<std::string> cacheKey = navigationContext.getCacheKey();
     if (!cacheKey)
     {
         errorHandler.reportError("could not get cache key for module");
+        return ResolvedRequire{ResolvedRequire::Status::ErrorReported};
+    }
+
+    if (!navigationContext.isModulePresent())
+    {
+        luaL_errorL(L, "no module present at resolved path");
         return ResolvedRequire{ResolvedRequire::Status::ErrorReported};
     }
 
