@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Self = @This();
+
 const luau = @import("root.zig");
 
 extern "c" fn Luau_Ast_Lexer_AstNameTable_new(*luau.Allocator) *NameTable;
@@ -32,6 +34,30 @@ const Position = extern struct {
 const Location = extern struct {
     begin: Position,
     end: Position,
+
+    pub fn slice(self: Location, source: []const u8) ![]const u8 {
+        var source_modified = source;
+        var current_line: usize = 0;
+        var current_column: usize = 0;
+
+        var start: ?usize = null;
+        for (source, 0..) |c, i| {
+            if (current_line == self.begin.line and current_column == self.begin.column) {
+                start = i;
+            }
+            if (current_line == self.end.line and current_column == self.end.column and start != null) {
+                source_modified = source[start.?..i];
+                return source_modified;
+            }
+            if (c == '\n') {
+                current_line += 1;
+                current_column = 0;
+            } else {
+                current_column += 1;
+            }
+        }
+        return error.InvalidLocation;
+    }
 };
 
 const zig_ParseResult_HotComment = extern struct {
@@ -43,6 +69,21 @@ const zig_ParseResult_HotComment = extern struct {
 
 const zig_ParseResult_HotComments = extern struct {
     values: [*]zig_ParseResult_HotComment,
+    size: usize,
+};
+
+const Comment = extern struct {
+    type: enum(u32) {
+        comment = 282,
+        block_comment = 283,
+        broken_comment = 286,
+        _,
+    },
+    location: Location,
+};
+
+const zig_ParseResult_Comments = extern struct {
+    values: [*]Comment,
     size: usize,
 };
 
@@ -60,6 +101,9 @@ const zig_ParseResult_Errors = extern struct {
 extern fn Luau_Ast_Parser_parse([*]const u8, usize, *NameTable, *luau.Allocator) callconv(.c) *ParseResult;
 extern fn Luau_Ast_ParseResult_free(*ParseResult) callconv(.c) void;
 extern fn Luau_Ast_ParseResult_get_root(*ParseResult) callconv(.c) *Node;
+extern fn Luau_Ast_ParseResult_get_cst_node(*ParseResult, *Node) callconv(.c) ?*CstNode;
+extern fn Luau_Ast_ParseResult_get_comments(*ParseResult) callconv(.c) zig_ParseResult_Comments;
+extern fn Luau_Ast_ParseResult_free_comments(zig_ParseResult_Comments) callconv(.c) void;
 extern fn Luau_Ast_ParseResult_get_hotcomments(*ParseResult) callconv(.c) zig_ParseResult_HotComments;
 extern fn Luau_Ast_ParseResult_free_hotcomments(zig_ParseResult_HotComments) callconv(.c) void;
 extern fn Luau_Ast_ParseResult_get_errors(*ParseResult) callconv(.c) zig_ParseResult_Errors;
@@ -93,6 +137,15 @@ pub const ParseResult = opaque {
         }
     };
 
+    pub const Comments = struct {
+        allocator: std.mem.Allocator,
+        values: []const Comment,
+
+        pub fn deinit(self: Comments) void {
+            self.allocator.free(self.values);
+        }
+    };
+
     pub const ParseError = struct {
         location: Location,
         message: []const u8,
@@ -117,6 +170,10 @@ pub const ParseResult = opaque {
         return Luau_Ast_ParseResult_get_root(self);
     }
 
+    pub fn getCstNode(self: *ParseResult, node: *Node) ?*CstNode {
+        return Luau_Ast_ParseResult_get_cst_node(self, node);
+    }
+
     pub fn getHotcomments(self: *ParseResult, allocator: std.mem.Allocator) !HotComments {
         const hotcomments = Luau_Ast_ParseResult_get_hotcomments(self);
         defer Luau_Ast_ParseResult_free_hotcomments(hotcomments);
@@ -133,6 +190,19 @@ pub const ParseResult = opaque {
                 .content = try allocator.dupe(u8, hotcomment.content[0..hotcomment.contentLen]),
             };
         }
+
+        return .{
+            .allocator = allocator,
+            .values = arr,
+        };
+    }
+
+    pub fn getComments(self: *ParseResult, allocator: std.mem.Allocator) !Comments {
+        const comments = Luau_Ast_ParseResult_get_comments(self);
+        defer Luau_Ast_ParseResult_free_comments(comments);
+
+        const arr = try allocator.dupe(Comment, comments.values[0..comments.size]);
+        errdefer allocator.free(arr);
 
         return .{
             .allocator = allocator,
@@ -199,6 +269,19 @@ test ParseResult {
             try std.testing.expectEqual(0, first.location.begin.column);
             try std.testing.expectEqual(0, first.location.end.line);
             try std.testing.expectEqual(7, first.location.end.column);
+
+            const comments = try parse_result.getComments(std.testing.allocator);
+            defer comments.deinit();
+
+            try std.testing.expectEqual(2, comments.values.len);
+            const first_normal = comments.values[1];
+            const slice_of_source = try first_normal.location.slice(source);
+            try std.testing.expectEqualStrings("-- This is a test comment", slice_of_source);
+            try std.testing.expectEqual(1, first_normal.location.begin.line);
+            try std.testing.expectEqual(0, first_normal.location.begin.column);
+            try std.testing.expectEqual(1, first_normal.location.end.line);
+            try std.testing.expectEqual(25, first_normal.location.end.column);
+            try std.testing.expectEqual(.comment, first_normal.type);
         }
 
         {
@@ -278,6 +361,451 @@ pub const TypeList = extern struct {
     types: Array(*Node),
     /// Null indicates no tail, not an untyped tail.
     tailType: ?*Node = null,
+};
+
+const CstNode = cst.Node;
+const CstConstantNumber = cst.ExprConstantNumber;
+const CstExprConstantString = cst.ExprConstantString;
+const CstExprCall = cst.ExprCall;
+const CstExprIndexExpr = cst.ExprIndexExpr;
+const CstExprFunction = cst.ExprFunction;
+const CstExprTable = cst.ExprTable;
+const CstExprOp = cst.ExprOp;
+const CstExprTypeAssertion = cst.ExprTypeAssertion;
+const CstExprIfElse = cst.ExprIfElse;
+const CstExprInterpString = cst.ExprInterpString;
+const CstStatDo = cst.StatDo;
+const CstStatRepeat = cst.StatRepeat;
+const CstStatReturn = cst.StatReturn;
+const CstStatLocal = cst.StatLocal;
+const CstStatFor = cst.StatFor;
+const CstStatForIn = cst.StatForIn;
+const CstStatAssign = cst.StatAssign;
+const CstStatCompoundAssign = cst.StatCompoundAssign;
+const CstStatFunction = cst.StatFunction;
+const CstStatLocalFunction = cst.StatLocalFunction;
+const CstGenericType = cst.GenericType;
+const CstGenericTypePack = cst.GenericTypePack;
+const CstStatTypeAlias = cst.StatTypeAlias;
+const CstStatTypeFunction = cst.StatTypeFunction;
+const CstTypeReference = cst.TypeReference;
+const CstTypeTable = cst.TypeTable;
+const CstTypeFunction = cst.TypeFunction;
+const CstTypeTypeof = cst.TypeTypeof;
+const CstTypeUnion = cst.TypeUnion;
+const CstTypeIntersection = cst.TypeIntersection;
+const CstTypeSingletonString = cst.TypeSingletonString;
+const CstTypePackExplicit = cst.TypePackExplicit;
+const CstTypePackGeneric = cst.TypePackGeneric;
+
+pub const cst = struct {
+    pub const Node = extern struct {
+        vtable: *const anyopaque,
+        classIndex: Self.Node.Kind,
+
+        pub const Kind = enum(u32) {
+            expr_constant_number,
+            expr_constant_string,
+            expr_call,
+            expr_index_expr,
+            expr_function,
+            expr_table,
+            expr_op,
+            expr_type_assertion,
+            expr_if_else,
+            expr_interp_string,
+            stat_do,
+            stat_repeat,
+            stat_return,
+            stat_local,
+            stat_for,
+            stat_for_in,
+            stat_assign,
+            stat_compound_assign,
+            stat_function,
+            stat_local_function,
+            generic_type,
+            generic_type_pack,
+            stat_type_alias,
+            stat_type_function,
+            type_reference,
+            type_table,
+            type_function,
+            type_typeof,
+            type_union,
+            type_intersection,
+            type_singleton_string,
+            type_pack_explicit,
+            type_pack_generic,
+
+            pub fn Type(self: Kind) type {
+                return switch (self) {
+                    .expr_constant_number => CstConstantNumber,
+                    .expr_constant_string => CstExprConstantString,
+                    .expr_call => CstExprCall,
+                    .expr_index_expr => CstExprIndexExpr,
+                    .expr_function => CstExprFunction,
+                    .expr_table => CstExprTable,
+                    .expr_op => CstExprOp,
+                    .expr_type_assertion => CstExprTypeAssertion,
+                    .expr_if_else => CstExprIfElse,
+                    .expr_interp_string => CstExprInterpString,
+                    .stat_do => CstStatDo,
+                    .stat_repeat => CstStatRepeat,
+                    .stat_return => CstStatReturn,
+                    .stat_local => CstStatLocal,
+                    .stat_for => CstStatFor,
+                    .stat_for_in => CstStatForIn,
+                    .stat_assign => CstStatAssign,
+                    .stat_compound_assign => CstStatCompoundAssign,
+                    .stat_function => CstStatFunction,
+                    .stat_local_function => CstStatLocalFunction,
+                    .generic_type => CstGenericType,
+                    .generic_type_pack => CstGenericTypePack,
+                    .stat_type_alias => CstStatTypeAlias,
+                    .stat_type_function => CstStatTypeFunction,
+                    .type_reference => CstTypeReference,
+                    .type_table => CstTypeTable,
+                    .type_function => CstTypeFunction,
+                    .type_typeof => CstTypeTypeof,
+                    .type_union => CstTypeUnion,
+                    .type_intersection => CstTypeIntersection,
+                    .type_singleton_string => CstTypeSingletonString,
+                    .type_pack_explicit => CstTypePackExplicit,
+                    .type_pack_generic => CstTypePackGeneric,
+
+                    else => unreachable,
+                };
+            }
+        };
+
+        pub fn cast(base: *CstNode, comptime to: Kind) ?*to.Type() {
+            if (base.classIndex == to) {
+                // const InnerBase = @TypeOf(@field(@as(to.Type(), undefined), "base"));
+                // const first_parent: *InnerBase = @alignCast(@fieldParentPtr("base", base));
+                // return @alignCast(@fieldParentPtr("base", first_parent));
+                return @ptrCast(base);
+            }
+            return null;
+        }
+    };
+
+    pub const ExprConstantNumber = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        value: Array(u8),
+    };
+
+    pub const ExprConstantString = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        sourceString: Array(u8),
+        quoteStyle: QuoteStyle,
+        blockDepth: u32,
+
+        pub const QuoteStyle = enum(u32) {
+            quoted_single,
+            quoted_double,
+            quoted_raw,
+            quoted_interp,
+        };
+    };
+
+    pub const ExprCall = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        openParens: Optional(Position),
+        closeParens: Optional(Position),
+        commaPositions: Array(Position),
+    };
+
+    pub const ExprIndexExpr = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        openBracketPosition: Position,
+        closeBracketPosition: Position,
+    };
+
+    pub const ExprFunction = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        functionKeywordPosition: Position,
+        openGenericsPosition: Position,
+        genericsCommaPositions: Array(Position),
+        closeGenericsPosition: Position,
+        argsCommaPositions: Array(Position),
+        returnSpecifierPosition: Position,
+    };
+
+    pub const ExprTable = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        items: Array(Item),
+
+        pub const Item = struct {
+            /// '[', only if Kind == General
+            indexerOpenPosition: Optional(Position),
+            /// ']', only if Kind == General
+            indexerClosePosition: Optional(Position),
+            /// only if Kind != List
+            equalsPosition: Optional(Position),
+            /// may be missing for last Item
+            separator: Optional(Separator),
+            /// may be missing for last Item
+            separatorPosition: Optional(Position),
+
+            pub const Separator = enum(u32) {
+                comma,
+                semicolon,
+            };
+        };
+    };
+
+    pub const ExprOp = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        opPosition: Position,
+    };
+
+    pub const ExprTypeAssertion = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        opPosition: Position,
+    };
+
+    pub const ExprIfElse = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        thenPosition: Position,
+        elsePosition: Position,
+        isElseIf: bool,
+    };
+
+    pub const ExprInterpString = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        sourceStrings: Array(Array(u8)),
+        stringPositions: Array(Position),
+    };
+
+    pub const StatDo = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        endPosition: Position,
+    };
+
+    pub const StatRepeat = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        untilPosition: Position,
+    };
+
+    pub const StatReturn = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        commaPositions: Array(Position),
+    };
+
+    pub const StatLocal = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        varsCommaPositions: Array(Position),
+        valuesCommaPositions: Array(Position),
+    };
+
+    pub const StatFor = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        equalsPosition: Position,
+        endCommaPosition: Position,
+        stepCommaPosition: Optional(Position),
+    };
+
+    pub const StatForIn = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        varsCommaPositions: Array(Position),
+        valuesCommaPositions: Array(Position),
+    };
+
+    pub const StatAssign = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        varsCommaPositions: Array(Position),
+        equalsPosition: Position,
+        valuesCommaPositions: Array(Position),
+    };
+
+    pub const StatCompoundAssign = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        opPosition: Position,
+    };
+
+    pub const StatFunction = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        functionKeywordPosition: Position,
+    };
+
+    pub const StatLocalFunction = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        localKeywordPosition: Position,
+        functionKeywordPosition: Position,
+    };
+
+    pub const GenericType = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        defaultEqualsPosition: Optional(Position),
+    };
+
+    pub const GenericTypePack = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        ellipsisPosition: Position,
+        defaultEqualsPosition: Optional(Position),
+    };
+
+    pub const StatTypeAlias = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        typeKeywordPosition: Position,
+        genericsOpenPosition: Position,
+        genericsCommaPositions: Array(Position),
+        genericsClosePosition: Position,
+        equalsPosition: Position,
+    };
+
+    pub const StatTypeFunction = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        typeKeywordPosition: Position,
+        functionKeywordPosition: Position,
+    };
+
+    pub const TypeReference = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        prefixPointPosition: Optional(Position),
+        openParametersPosition: Position,
+        parametersCommaPositions: Array(Position),
+        closeParametersPosition: Position,
+    };
+
+    pub const TypeTable = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        items: Array(Item),
+        isArray: bool,
+
+        pub const Item = struct {
+            kind: Kind,
+            indexerOpenPosition: Optional(Position), // '[', only if Kind != Property
+            indexerClosePosition: Optional(Position), // ']' only if Kind != Property
+            colonPosition: Position,
+            separator: Optional(CstExprTable.Item.Separator), // may be missing for last Item
+            separatorPosition: Optional(Position),
+
+            stringInfo: ?*CstExprConstantString, // only if Kind == StringProperty
+
+            pub const Kind = enum(u32) {
+                indexer,
+                property,
+                string_property,
+            };
+        };
+    };
+
+    pub const TypeFunction = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        openGenericsPosition: Position,
+        genericsCommaPositions: Array(Position),
+        closeGenericsPosition: Position,
+        openArgsPosition: Position,
+        argumentNameColonPositions: Array(Optional(Position)),
+        argumentsCommaPositions: Array(Position),
+        closeArgsPosition: Position,
+        returnArrowPosition: Position,
+    };
+
+    pub const TypeTypeof = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        openPosition: Position,
+        closePosition: Position,
+    };
+
+    pub const TypeUnion = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        leadingPosition: Optional(Position),
+        separatorPositions: Array(Position),
+    };
+
+    pub const TypeIntersection = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        leadingPosition: Optional(Position),
+        separatorPositions: Array(Position),
+    };
+
+    pub const TypeSingletonString = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        sourceString: Array(u8),
+        quoteStyle: CstExprConstantString.QuoteStyle,
+        blockDepth: u32,
+    };
+
+    pub const TypePackExplicit = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        openParenthesesPosition: Position,
+        closeParenthesesPosition: Position,
+        commaPositions: Array(Position),
+    };
+
+    pub const TypePackGeneric = extern struct {
+        vtable: *const anyopaque,
+        classIndex: CstNode.Kind,
+
+        ellipsisPosition: Position,
+    };
 };
 
 pub const Node = extern struct {

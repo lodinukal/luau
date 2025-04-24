@@ -1,7 +1,7 @@
 .{
     .name = .luau,
     .version = "0.669.0",
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.15.0-dev.375+8f8f37fb0",
     .fingerprint = 0x5e07e249f4c12649,
     .dependencies = .{},
     .paths = .{

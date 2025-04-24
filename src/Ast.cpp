@@ -43,6 +43,8 @@ EXPORT void ZIG_LUAU_AST(Lexer_AstNameTable_free)(Luau::AstNameTable* value)
 EXPORT Luau::ParseResult* ZIG_LUAU_AST(Parser_parse)(const char* source, size_t sourceLen, Luau::AstNameTable* names, Luau::Allocator* allocator)
 {
     Luau::ParseOptions parseOptions;
+    parseOptions.storeCstData = true;
+    parseOptions.captureComments = true;
     Luau::ParseResult result = Luau::Parser::parse(source, sourceLen, *names, *allocator, parseOptions);
     return new Luau::ParseResult(result);
 }
@@ -55,6 +57,13 @@ EXPORT void ZIG_LUAU_AST(ParseResult_free)(Luau::ParseResult* value)
 EXPORT Luau::AstNode* ZIG_LUAU_AST(ParseResult_get_root)(Luau::ParseResult* value)
 {
     return value->root;
+}
+
+// optional
+EXPORT Luau::CstNode* ZIG_LUAU_AST(ParseResult_get_cst_node)(Luau::ParseResult* value, Luau::AstNode* node)
+{
+    Luau::CstNode** found = value->cstNodeMap.find(node);
+    return found ? *found : nullptr;
 }
 
 EXPORT struct zig_ParseResult_HotComment
@@ -71,6 +80,12 @@ EXPORT struct zig_ParseResult_HotComments
     size_t size;
 };
 
+EXPORT struct zig_ParseResult_Comments
+{
+    Luau::Comment* values;
+    size_t size;
+};
+
 EXPORT struct zig_ParseResult_Error
 {
     Luau::Location location;
@@ -83,6 +98,22 @@ EXPORT struct zig_ParseResult_Errors
     zig_ParseResult_Error* values;
     size_t size;
 };
+
+EXPORT zig_ParseResult_Comments ZIG_LUAU_AST(ParseResult_get_comments)(Luau::ParseResult* value)
+{
+    size_t size = value->commentLocations.size();
+    Luau::Comment* values = new Luau::Comment[size];
+    for (size_t i = 0; i < size; i++)
+    {
+        values[i] = value->commentLocations[i];
+    }
+    return {values, size};
+}
+
+EXPORT void ZIG_LUAU_AST(ParseResult_free_comments)(zig_ParseResult_Comments comments)
+{
+    delete[] comments.values;
+}
 
 EXPORT zig_ParseResult_HotComments ZIG_LUAU_AST(ParseResult_get_hotcomments)(Luau::ParseResult* value)
 {

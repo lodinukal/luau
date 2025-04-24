@@ -57,6 +57,14 @@ pub const Index = enum(i32) {
     pub inline fn shift(self: Index, n: i32) Index {
         return @enumFromInt(@intFromEnum(self) + n);
     }
+
+    pub inline fn shiftIfNegative(self: Index, n: i32) Index {
+        return if (@intFromEnum(self) < 0) self.shift(n) else self;
+    }
+
+    pub inline fn int(self: Index) i32 {
+        return @intFromEnum(self);
+    }
 };
 
 pub const Status = enum(u32) {
@@ -85,17 +93,18 @@ pub const Alloc = *const fn (
     pointer: ?*anyopaque,
     old_size: usize,
     new_size: usize,
-) callconv(.c) ?*align(alignment) anyopaque;
+) callconv(.c) ?*align(alignment_raw) anyopaque;
 
-const alignment = @alignOf(std.c.max_align_t);
+const alignment_raw = @alignOf(std.c.max_align_t);
+const alignment: std.mem.Alignment = .of(std.c.max_align_t);
 /// Allows Luau to allocate memory using a Zig allocator passed in via data.
-pub fn alloc(data: ?*anyopaque, ptr: ?*anyopaque, osize: usize, nsize: usize) callconv(.c) ?*align(alignment) anyopaque {
+pub fn alloc(data: ?*anyopaque, ptr: ?*anyopaque, osize: usize, nsize: usize) callconv(.c) ?*align(alignment_raw) anyopaque {
     // just like malloc() returns a pointer "which is suitably aligned for any built-in type",
     // the memory allocated by this function should also be aligned for any type that Lua may
     // desire to allocate. use the largest alignment for the target
     const allocator_ptr: *std.mem.Allocator = @ptrCast(@alignCast(data.?));
 
-    if (@as(?[*]align(alignment) u8, @ptrCast(@alignCast(ptr)))) |prev_ptr| {
+    if (@as(?[*]align(alignment_raw) u8, @ptrCast(@alignCast(ptr)))) |prev_ptr| {
         const prev_slice = prev_ptr[0..osize];
 
         // when nsize is zero the allocator must behave like free and return null
@@ -146,6 +155,8 @@ pub const Vector: type = @Vector(config.vector_size, f32);
 pub const Buffer = union(enum) {
     mutable: []u8,
     immutable: []const u8,
+
+    pub const empty: Buffer = .{ .immutable = &.{} };
 
     pub inline fn literal(buf: []const u8) Buffer {
         return .{ .immutable = buf };
@@ -409,7 +420,7 @@ pub const State = opaque {
 
     pub inline fn toBuffer(l: *State, idx: Index) Buffer {
         var len: usize = 0;
-        const ptr: [*]u8 = @ptrCast(raw.lua_tobuffer(tlua(l), @intFromEnum(idx), &len)[0..len] orelse return &.{});
+        const ptr: [*]u8 = @ptrCast(raw.lua_tobuffer(tlua(l), @intFromEnum(idx), &len) orelse return .empty);
         return .{ .mutable = ptr[0..len] };
     }
 
@@ -419,6 +430,10 @@ pub const State = opaque {
     }
 
     // push functions
+
+    pub inline fn pushIndex(l: *State, idx: Index) void {
+        raw.lua_pushvalue(tlua(l), @intFromEnum(idx));
+    }
 
     pub inline fn pushNil(l: *State) void {
         raw.lua_pushnil(tlua(l));
@@ -515,9 +530,9 @@ pub const State = opaque {
         return raw.lua_newuserdatataggedwithmetatable(tlua(l), sz, tag);
     }
 
-    pub inline fn newUserdataDtor(l: *State, sz: usize, dtor: ?*fn (ptr: ?*anyopaque) callconv(.c) void) ?*anyopaque {
+    pub inline fn newUserdataDtor(l: *State, sz: usize, dtor: ?*const fn (ptr: *anyopaque) callconv(.c) void) ?*anyopaque {
         // return lua_newuserdatadtor(l, sz, dtor);
-        return raw.lua_newuserdatadtor(tlua(l), sz, dtor);
+        return raw.lua_newuserdatadtor(tlua(l), sz, @ptrCast(dtor));
     }
 
     pub inline fn newBuffer(l: *State, sz: usize) Buffer {
@@ -550,6 +565,12 @@ pub const State = opaque {
 
     pub inline fn createTable(l: *State, narr: i32, nrec: i32) void {
         raw.lua_createtable(tlua(l), narr, nrec);
+    }
+
+    pub inline fn findTable(l: *State, idx: Index, name: [:0]const u8, sizehint: i32) ?[:0]const u8 {
+        const result = raw.luaL_findtable(tlua(l), @intFromEnum(idx), name, sizehint);
+        if (result == null) return null;
+        return std.mem.span(result);
     }
 
     pub inline fn setReadonly(l: *State, idx: Index, enabled: bool) void {
@@ -682,7 +703,7 @@ pub const State = opaque {
         raw.lua_error(tlua(l));
     }
 
-    pub inline fn errStr(l: *State, comptime fmt: []const u8, args: anytype) noreturn {
+    pub inline fn errStr(l: *State, comptime fmt: [:0]const u8, args: anytype) noreturn {
         l.pushFmtString(fmt, args) catch l.pushString(fmt);
         l.err();
     }
@@ -711,7 +732,7 @@ pub const State = opaque {
     };
 
     pub inline fn newMetatable(l: *State, key: [:0]const u8) !void {
-        if (raw.luaL_newmetatable(l, key.ptr) == 0) {
+        if (raw.luaL_newmetatable(tlua(l), key.ptr) == 0) {
             return error.FailedToCreateMetatable;
         }
     }
@@ -756,10 +777,12 @@ pub const State = opaque {
     }
 
     // custom helpers
-    pub fn pushVal(l: *State, val: anytype) void {
+    pub fn pushVal(l: *State, val: anytype, stack_offset: ?i32) void {
         const T = @TypeOf(val);
         const ti = @typeInfo(T);
-        if (T == []const u8 or T == []u8) {
+        if (T == Index) {
+            l.pushIndex(if (stack_offset) |offset| val.shiftIfNegative(offset) else val);
+        } else if (T == []const u8 or T == []u8 or T == [:0]const u8 or T == [:0]u8) {
             l.pushLengthString(val);
         } else if (T == [*:0]const u8 or T == [*:0]u8) {
             l.pushString(val);
@@ -797,35 +820,59 @@ pub const State = opaque {
                     l.createTable(@intCast(val.len), 0);
                     for (val, 1..) |v, i| {
                         l.pushInteger(@intCast(i));
-                        l.pushVal(v);
+                        l.pushVal(v, stack_offset);
                         l.setTable(.at(-3));
                     }
+                } else if (ptr.size == .one and child_type_info == .@"struct") {
+                    l.createPushTable(val.*, stack_offset);
                 } else {
-                    @compileError(std.fmt.comptimePrint("Unsupported type: {s}", .{@typeName(T)}));
+                    // @compileError(std.fmt.comptimePrint("Unsupported type: {s}", .{@typeName(T)}));
+                    // UNSAFE
+                    l.pushLightUserdata(@constCast(@ptrCast(val)));
                 }
             },
             .optional => |opt| {
                 if (val) |v| {
-                    l.pushVal(@as(opt.child, v));
+                    l.pushVal(@as(opt.child, v), stack_offset);
                 } else {
                     l.pushNil();
                 }
             },
             .@"struct" => {
-                l.createPushTable(val);
+                l.createPushTable(val, stack_offset);
+            },
+            .@"fn" => |_| {
+                l.pushFunction(val, @typeName(T));
+            },
+            .void => {
+                l.pushNil();
+            },
+            .@"enum" => {
+                const as_string = std.enums.tagName(T, val) orelse {
+                    l.pushFmtString("Unknown {s} ({})", .{ @typeName(T), @intFromEnum(val) }) catch {
+                        l.pushInteger(@intCast(@intFromEnum(val)));
+                    };
+                    return;
+                };
+                l.pushLengthString(as_string);
             },
             else => @compileError(std.fmt.comptimePrint("Unsupported type: {s}", .{@typeName(T)})),
         }
     }
 
-    pub fn pushTable(l: *State, index: Index, val: anytype) void {
+    pub fn pushTable(l: *State, index: Index, val: anytype, stack_offset: ?i32) void {
         const T = @TypeOf(val);
         const ti = @typeInfo(T);
         if (ti != .@"struct") @compileError("pushTable only works with structs, use pushVal for other types");
 
         if (@hasDecl(T, "luauPushTable")) {
-            const customPushTable: fn (val: T, l: *State, table: Index) void = @field(T, "luauPushTable");
-            customPushTable(val, l, index);
+            const customPushTable: fn (
+                val: T,
+                l: *State,
+                table: Index,
+                stack_offset: ?i32,
+            ) void = @field(T, "luauPushTable");
+            customPushTable(val, l, index, stack_offset);
             return;
         }
 
@@ -833,7 +880,7 @@ pub const State = opaque {
         inline for (fields) |field| {
             const field_name = field.name;
             const field_value = @field(val, field_name);
-            l.pushVal(field_value);
+            l.pushVal(field_value, stack_offset);
             const old_index: i32 = @intFromEnum(index);
             // adjusting because this will push the value to the stack
             // and the index will be incremented
@@ -842,9 +889,9 @@ pub const State = opaque {
         }
     }
 
-    pub fn createPushTable(l: *State, val: anytype) void {
+    pub fn createPushTable(l: *State, val: anytype, stack_offset: ?i32) void {
         l.createTable(0, 0);
-        l.pushTable(.at(-1), val);
+        l.pushTable(.at(-1), val, (stack_offset orelse 0) - 1);
     }
 };
 
@@ -904,7 +951,6 @@ pub const RawGcOp = enum(c_uint) {
 
 pub const ZigFnInt = *const fn (state: *State) i32;
 pub const ZigFnVoid = *const fn (state: *State) void;
-pub const ZigFnErrorSet = *const fn (state: *State) anyerror!i32;
 
 pub fn zigToCFn(comptime fn_ty: std.builtin.Type.Fn, comptime f: anytype) CFunction {
     const ri = @typeInfo(fn_ty.return_type orelse @compileError("Fn must return something"));
@@ -926,13 +972,16 @@ pub fn zigToCFn(comptime fn_ty: std.builtin.Type.Fn, comptime f: anytype) CFunct
                 }
             }.inner;
         },
-        .error_union => |_| {
-            _ = @as(ZigFnErrorSet, f);
+        .error_union => |err_union| {
+            const error_set = @typeInfo(err_union.error_set).error_set.?;
+            const new_error_set = @Type(.{
+                .error_set = error_set ++ &[_]std.builtin.Type.Error{.{ .name = "RaiseLuauError" }},
+            });
             return struct {
                 fn inner(s: *State) callconv(.C) c_int {
                     if (@call(.always_inline, f, .{s})) |res|
-                        return res
-                    else |err| switch (@as(anyerror, @errorCast(err))) {
+                        return if (@TypeOf(res) == void) 0 else @intCast(res)
+                    else |err| switch (@as(new_error_set, @errorCast(err))) {
                         error.RaiseLuauError => s.err(),
                         else => s.errStr("{s}", .{@errorName(err)}),
                     }
@@ -1006,13 +1055,13 @@ test "State.pushVal" {
     defer l.deinit();
 
     const test_string = "test";
-    l.pushVal(test_string);
+    l.pushVal(test_string, null);
 
     const result = l.toLengthString(.at(-1));
     try std.testing.expectEqualSlices(u8, test_string, result);
 
     const test_number: Number = 1.0;
-    l.pushVal(test_number);
+    l.pushVal(test_number, null);
 
     const result_num = l.toNumberx(.at(-1));
     try std.testing.expectEqual(test_number, result_num);
@@ -1049,14 +1098,14 @@ test "State.pushTable" {
 
     l.open(.{});
     // typed table
-    l.createPushTable(input);
+    l.createPushTable(input, null);
     // anonymous table
     l.pushTable(.at(-1), .{
         .z = "test",
         .a = Buffer.literal(&.{ 0, 10, 10, 10 }),
         .b = @as(?u8, null),
         .c = @as(?u8, 1),
-    });
+    }, null);
     l.setGlobal("input");
 
     const chunkname = "test";
@@ -1077,11 +1126,11 @@ test "State.pushTable" {
 const MyTestTable = struct {
     helloo: i32 = 1,
 
-    pub fn luauPushTable(self: MyTestTable, l: *State, table: Index) void {
+    pub fn luauPushTable(self: MyTestTable, l: *State, table: Index, _: ?i32) void {
         l.pushString("test");
-        l.setField(table.shift(-1), "test");
+        l.setField(table.shiftIfNegative(-1), "test");
         l.pushInteger(self.helloo);
-        l.setField(table.shift(-1), "renamed");
+        l.setField(table.shiftIfNegative(-1), "renamed");
     }
 };
 test "State.pushTable with a custom function" {
@@ -1094,7 +1143,7 @@ test "State.pushTable with a custom function" {
     const test_table = MyTestTable{
         .helloo = 5,
     };
-    l.createPushTable(test_table);
+    l.createPushTable(test_table, null);
     l.setGlobal("input");
 
     const many_tables: []const MyTestTable = &.{
@@ -1105,7 +1154,7 @@ test "State.pushTable with a custom function" {
             .helloo = 2,
         },
     };
-    l.pushVal(many_tables);
+    l.pushVal(many_tables, null);
     l.setGlobal("many_tables");
 
     const code =

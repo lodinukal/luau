@@ -6,7 +6,7 @@ pub const CVTable = extern struct {
 
     fn zigAllocate(context: *anyopaque, size: usize) callconv(.c) ?*align(alignment) anyopaque {
         const as_allocator: *std.mem.Allocator = @ptrCast(@alignCast(context));
-        const bytes = as_allocator.alignedAlloc(u8, 8, size + 8) catch return null;
+        const bytes = as_allocator.alignedAlloc(u8, .@"8", size + 8) catch return null;
         std.mem.writeInt(usize, bytes[0..@sizeOf(usize)], size, .little);
         return (bytes[8..]).ptr;
     }

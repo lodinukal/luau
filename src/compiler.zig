@@ -2,7 +2,7 @@ const std = @import("std");
 const luau = @import("root.zig");
 const ast = @import("ast.zig");
 
-const c = @cImport({
+pub const c = @cImport({
     @cInclude("luacode.h");
 });
 
