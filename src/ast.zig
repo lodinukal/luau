@@ -735,6 +735,7 @@ pub const cst = struct {
             separatorPosition: Optional(Position),
 
             stringInfo: ?*CstExprConstantString, // only if Kind == StringProperty
+            stringPosition: Position, // only if Kind == StringProperty
 
             pub const Kind = enum(u32) {
                 indexer,

@@ -2,7 +2,7 @@ const std = @import("std");
 
 const compile_commands = @import("compile_commands.zig");
 
-const LUAU_VERSION: std.SemanticVersion = .{ .major = 0, .minor = 669, .patch = 0 };
+const LUAU_VERSION: std.SemanticVersion = .{ .major = 0, .minor = 670, .patch = 0 };
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});

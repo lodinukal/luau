@@ -83,11 +83,26 @@ pub const Configuration = extern struct {
 /// Populates function pointers in the given Configuration.
 pub const ConfigurationInitFn = *const fn (config: *Configuration) callconv(.c) void;
 
+extern fn lua_pushrequire(
+    l: *luau.State,
+    config_init: ConfigurationInitFn,
+    context: *anyopaque,
+) callconv(.c) void;
+
+/// lua_pushrequire but sets global require
 extern fn luaopen_require(
     l: *luau.State,
     config_init: ConfigurationInitFn,
     context: *anyopaque,
 ) callconv(.c) void;
+
+pub fn pushrequire(
+    l: *luau.State,
+    config_init: ConfigurationInitFn,
+    context: *anyopaque,
+) void {
+    lua_pushrequire(l, config_init, context);
+}
 
 pub fn open(
     l: *luau.State,
