@@ -330,7 +330,7 @@ pub const State = opaque {
         return raw.lua_equal(tlua(l), @intFromEnum(a), @intFromEnum(b)) != 0;
     }
 
-    pub inline fn rawequal(l: *State, a: Index, b: Index) bool {
+    pub inline fn rawEqual(l: *State, a: Index, b: Index) bool {
         return raw.lua_rawequal(tlua(l), @intFromEnum(a), @intFromEnum(b)) != 0;
     }
 
@@ -404,6 +404,20 @@ pub const State = opaque {
 
     pub inline fn toUserdataTagged(l: *State, idx: Index, tag: i32) *anyopaque {
         return raw.lua_touserdatatagged(tlua(l), @intFromEnum(idx), tag);
+    }
+
+    pub inline fn checkUserdata(l: *State, idx: Index, table_name: [:0]const u8) ?*anyopaque {
+        const p = raw.lua_touserdata(tlua(l), @intFromEnum(idx)) orelse return null;
+        if (l.getMetatable(idx) == .none) {
+            return null;
+        }
+        _ = l.getMetatableRegistry(table_name);
+        if (l.rawEqual(.at(-1), .at(-2))) {
+            l.pop(2);
+            return p;
+        }
+        l.pop(2);
+        return null;
     }
 
     pub inline fn userdataTag(l: *State, idx: Index) i32 {
