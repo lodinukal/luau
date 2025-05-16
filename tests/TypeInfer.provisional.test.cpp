@@ -19,7 +19,6 @@ LUAU_FASTINT(LuauTarjanChildLimit)
 LUAU_FASTINT(LuauTypeInferIterationLimit)
 LUAU_FASTINT(LuauTypeInferRecursionLimit)
 LUAU_FASTINT(LuauTypeInferTypePackLoopLimit)
-LUAU_FASTFLAG(LuauImproveTypePathsInErrors)
 
 TEST_SUITE_BEGIN("ProvisionalTests");
 
@@ -874,18 +873,11 @@ TEST_CASE_FIXTURE(Fixture, "assign_table_with_refined_property_with_a_similar_ty
     else
     {
         LUAU_REQUIRE_ERROR_COUNT(1, result);
-        const std::string expected = (FFlag::LuauImproveTypePathsInErrors) ?
-                                                                           R"(Type
+        const std::string expected =
+            R"(Type
 	'{| x: number? |}'
 could not be converted into
 	'{| x: number |}'
-caused by:
-  Property 'x' is not compatible.
-Type 'number?' could not be converted into 'number' in an invariant context)"
-                                                                           : R"(Type
-    '{| x: number? |}'
-could not be converted into
-    '{| x: number |}'
 caused by:
   Property 'x' is not compatible.
 Type 'number?' could not be converted into 'number' in an invariant context)";
@@ -1039,7 +1031,7 @@ TEST_CASE_FIXTURE(Fixture, "optional_class_instances_are_invariant_old_solver")
 {
     DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
-    createSomeClasses(&frontend);
+    createSomeExternTypes(&frontend);
 
     CheckResult result = check(R"(
         function foo(ref: {current: Parent?})
@@ -1057,7 +1049,7 @@ TEST_CASE_FIXTURE(Fixture, "optional_class_instances_are_invariant_new_solver")
 {
     ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
-    createSomeClasses(&frontend);
+    createSomeExternTypes(&frontend);
 
     CheckResult result = check(R"(
         function foo(ref: {read current: Parent?})

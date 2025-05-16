@@ -4,6 +4,8 @@
 #include "Luau/RequireNavigator.h"
 #include "Luau/Require.h"
 
+#include <string>
+
 struct lua_State;
 struct luarequire_Configuration;
 
@@ -29,8 +31,8 @@ public:
 
     // Custom capabilities
     bool isModulePresent() const;
-    std::optional<std::string> getContents() const;
     std::optional<std::string> getChunkname() const;
+    std::optional<std::string> getLoadname() const;
     std::optional<std::string> getCacheKey() const;
 
 private:
@@ -48,11 +50,12 @@ private:
 class RuntimeErrorHandler : public ErrorHandler
 {
 public:
-    RuntimeErrorHandler(lua_State* L);
+    RuntimeErrorHandler(lua_State* L, std::string requiredPath);
     void reportError(std::string message) override;
 
 private:
     lua_State* L;
+    std::string errorPrefix;
 };
 
 } // namespace Luau::Require

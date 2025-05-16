@@ -16,6 +16,9 @@ LUAU_FASTFLAG(LuauSolverV2)
 LUAU_FASTFLAGVARIABLE(LuauPreprocessTypestatedArgument)
 LUAU_FASTFLAGVARIABLE(LuauDfgScopeStackTrueReset)
 LUAU_FASTFLAGVARIABLE(LuauDfgScopeStackNotNull)
+LUAU_FASTFLAG(LuauStoreReturnTypesAsPackOnAst)
+LUAU_FASTFLAGVARIABLE(LuauDoNotAddUpvalueTypesToLocalType)
+LUAU_FASTFLAGVARIABLE(LuauDfgIfBlocksShouldRespectControlFlow)
 namespace Luau
 {
 
@@ -470,7 +473,7 @@ ControlFlow DataFlowGraphBuilder::visit(AstStat* s)
         return visit(d);
     else if (auto d = s->as<AstStatDeclareFunction>())
         return visit(d);
-    else if (auto d = s->as<AstStatDeclareClass>())
+    else if (auto d = s->as<AstStatDeclareExternType>())
         return visit(d);
     else if (auto error = s->as<AstStatError>())
         return visit(error);
@@ -499,12 +502,26 @@ ControlFlow DataFlowGraphBuilder::visit(AstStatIf* i)
     }
 
     DfgScope* scope = FFlag::LuauDfgScopeStackNotNull ? currentScope() : currentScope_DEPRECATED();
-    if (thencf != ControlFlow::None && elsecf == ControlFlow::None)
-        join(scope, scope, elseScope);
-    else if (thencf == ControlFlow::None && elsecf != ControlFlow::None)
-        join(scope, thenScope, scope);
-    else if ((thencf | elsecf) == ControlFlow::None)
-        join(scope, thenScope, elseScope);
+    if (FFlag::LuauDfgIfBlocksShouldRespectControlFlow)
+    {
+        // If the control flow from the `if` or `else` block is non-linear,
+        // then we should assume that the _other_ branch is the one taken.
+        if (thencf != ControlFlow::None && elsecf == ControlFlow::None)
+            scope->inherit(elseScope);
+        else if (thencf == ControlFlow::None && elsecf != ControlFlow::None)
+            scope->inherit(thenScope);
+        else if ((thencf | elsecf) == ControlFlow::None)
+            join(scope, thenScope, elseScope);
+    }
+    else
+    {
+        if (thencf != ControlFlow::None && elsecf == ControlFlow::None)
+            join(scope, scope, elseScope);
+        else if (thencf == ControlFlow::None && elsecf != ControlFlow::None)
+            join(scope, thenScope, scope);
+        else if ((thencf | elsecf) == ControlFlow::None)
+            join(scope, thenScope, elseScope);
+    }
 
     if (thencf == elsecf)
         return thencf;
@@ -808,12 +825,15 @@ ControlFlow DataFlowGraphBuilder::visit(AstStatDeclareFunction* d)
     visitGenerics(d->generics);
     visitGenericPacks(d->genericPacks);
     visitTypeList(d->params);
-    visitTypeList(d->retTypes);
+    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
+        visitTypePack(d->retTypes);
+    else
+        visitTypeList(d->retTypes_DEPRECATED);
 
     return ControlFlow::None;
 }
 
-ControlFlow DataFlowGraphBuilder::visit(AstStatDeclareClass* d)
+ControlFlow DataFlowGraphBuilder::visit(AstStatDeclareExternType* d)
 {
     // This declaration does not "introduce" any bindings in value namespace,
     // so there's no symbolic value to begin with. We'll traverse the properties
@@ -821,7 +841,7 @@ ControlFlow DataFlowGraphBuilder::visit(AstStatDeclareClass* d)
     DfgScope* unreachable = makeChildScope();
     PushScope ps{scopeStack, unreachable};
 
-    for (AstDeclaredClassProp prop : d->props)
+    for (AstDeclaredExternTypeProperty prop : d->props)
         visitType(prop.ty);
 
     return ControlFlow::None;
@@ -1032,8 +1052,16 @@ DataFlowResult DataFlowGraphBuilder::visitExpr(AstExprFunction* f)
     if (f->varargAnnotation)
         visitTypePack(f->varargAnnotation);
 
-    if (f->returnAnnotation)
-        visitTypeList(*f->returnAnnotation);
+    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
+    {
+        if (f->returnAnnotation)
+            visitTypePack(f->returnAnnotation);
+    }
+    else
+    {
+        if (f->returnAnnotation_DEPRECATED)
+            visitTypeList(*f->returnAnnotation_DEPRECATED);
+    }
 
     // TODO: function body can be re-entrant, as in mutations that occurs at the end of the function can also be
     // visible to the beginning of the function, so statically speaking, the body of the function has an exit point
@@ -1151,7 +1179,7 @@ DefId DataFlowGraphBuilder::visitLValue(AstExprLocal* l, DefId incomingDef)
     DfgScope* scope = FFlag::LuauDfgScopeStackNotNull ? currentScope() : currentScope_DEPRECATED();
 
     // In order to avoid alias tracking, we need to clip the reference to the parent def.
-    if (scope->canUpdateDefinition(l->local))
+    if (scope->canUpdateDefinition(l->local) && !(FFlag::LuauDoNotAddUpvalueTypesToLocalType && l->upvalue))
     {
         DefId updated = defArena->freshCell(l->local, l->location, containsSubscriptedDefinition(incomingDef));
         scope->bindings[l->local] = updated;
@@ -1275,7 +1303,10 @@ void DataFlowGraphBuilder::visitType(AstTypeFunction* f)
     visitGenerics(f->generics);
     visitGenericPacks(f->genericPacks);
     visitTypeList(f->argTypes);
-    visitTypeList(f->returnTypes);
+    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
+        visitTypePack(f->returnTypes);
+    else
+        visitTypeList(f->returnTypes_DEPRECATED);
 }
 
 void DataFlowGraphBuilder::visitType(AstTypeTypeof* t)

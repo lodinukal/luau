@@ -8,6 +8,8 @@
 
 #include <math.h>
 
+LUAU_FASTFLAG(LuauStoreReturnTypesAsPackOnAst)
+
 namespace Luau
 {
 
@@ -431,8 +433,16 @@ struct AstJsonEncoder : public AstVisitor
                 if (node->self)
                     PROP(self);
                 PROP(args);
-                if (node->returnAnnotation)
-                    PROP(returnAnnotation);
+                if (FFlag::LuauStoreReturnTypesAsPackOnAst)
+                {
+                    if (node->returnAnnotation)
+                        PROP(returnAnnotation);
+                }
+                else
+                {
+                    if (node->returnAnnotation_DEPRECATED)
+                        write("returnAnnotation", node->returnAnnotation_DEPRECATED);
+                }
                 PROP(vararg);
                 PROP(varargLocation);
                 if (node->varargAnnotation)
@@ -465,26 +475,26 @@ struct AstJsonEncoder : public AstVisitor
         writeRaw("}");
     }
 
-    void write(const AstGenericType& genericType)
+    void write(class AstGenericType* genericType)
     {
         writeRaw("{");
         bool c = pushComma();
         writeType("AstGenericType");
-        write("name", genericType.name);
-        if (genericType.defaultValue)
-            write("luauType", genericType.defaultValue);
+        write("name", genericType->name);
+        if (genericType->defaultValue)
+            write("luauType", genericType->defaultValue);
         popComma(c);
         writeRaw("}");
     }
 
-    void write(const AstGenericTypePack& genericTypePack)
+    void write(class AstGenericTypePack* genericTypePack)
     {
         writeRaw("{");
         bool c = pushComma();
         writeType("AstGenericTypePack");
-        write("name", genericTypePack.name);
-        if (genericTypePack.defaultValue)
-            write("luauType", genericTypePack.defaultValue);
+        write("name", genericTypePack->name);
+        if (genericTypePack->defaultValue)
+            write("luauType", genericTypePack->defaultValue);
         popComma(c);
         writeRaw("}");
     }
@@ -902,7 +912,10 @@ struct AstJsonEncoder : public AstVisitor
                 PROP(paramNames);
                 PROP(vararg);
                 PROP(varargLocation);
-                PROP(retTypes);
+                if (FFlag::LuauStoreReturnTypesAsPackOnAst)
+                    PROP(retTypes);
+                else
+                    write("retTypes", node->retTypes_DEPRECATED);
                 PROP(generics);
                 PROP(genericPacks);
             }
@@ -923,7 +936,7 @@ struct AstJsonEncoder : public AstVisitor
         );
     }
 
-    void write(const AstDeclaredClassProp& prop)
+    void write(const AstDeclaredExternTypeProperty& prop)
     {
         writeRaw("{");
         bool c = pushComma();
@@ -936,7 +949,7 @@ struct AstJsonEncoder : public AstVisitor
         writeRaw("}");
     }
 
-    void write(class AstStatDeclareClass* node)
+    void write(class AstStatDeclareExternType* node)
     {
         writeNode(
             node,
@@ -1048,7 +1061,10 @@ struct AstJsonEncoder : public AstVisitor
                 PROP(genericPacks);
                 PROP(argTypes);
                 PROP(argNames);
-                PROP(returnTypes);
+                if (FFlag::LuauStoreReturnTypesAsPackOnAst)
+                    PROP(returnTypes);
+                else
+                    write("returnTypes", node->returnTypes_DEPRECATED);
             }
         );
     }
@@ -1429,7 +1445,7 @@ struct AstJsonEncoder : public AstVisitor
         return false;
     }
 
-    bool visit(class AstStatDeclareClass* node) override
+    bool visit(class AstStatDeclareExternType* node) override
     {
         write(node);
         return false;

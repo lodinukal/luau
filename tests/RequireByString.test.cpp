@@ -7,6 +7,8 @@
 #include "lualib.h"
 
 #include "Luau/Repl.h"
+#include "Luau/ReplRequirer.h"
+#include "Luau/Require.h"
 #include "Luau/FileUtils.h"
 
 #include "doctest.h"
@@ -331,6 +333,13 @@ TEST_CASE_FIXTURE(ReplWithPathFixture, "RequireSimpleRelativePath")
     assertOutputContainsAll({"true", "result from dependency"});
 }
 
+TEST_CASE_FIXTURE(ReplWithPathFixture, "RequireSimpleRelativePathWithinPcall")
+{
+    std::string path = getLuauDirectory(PathType::Relative) + "/tests/require/without_config/dependency";
+    runCode(L, "return pcall(require, \"" + path + "\")");
+    assertOutputContainsAll({"true", "result from dependency"});
+}
+
 TEST_CASE_FIXTURE(ReplWithPathFixture, "RequireRelativeToRequiringFile")
 {
     std::string path = getLuauDirectory(PathType::Relative) + "/tests/require/without_config/module";
@@ -371,7 +380,9 @@ TEST_CASE_FIXTURE(ReplWithPathFixture, "RequireWithFileAmbiguity")
     std::string ambiguousPath = getLuauDirectory(PathType::Relative) + "/tests/require/without_config/ambiguous_file_requirer";
 
     runProtectedRequire(ambiguousPath);
-    assertOutputContainsAll({"false", "require path could not be resolved to a unique file"});
+    assertOutputContainsAll(
+        {"false", "error requiring module \"./ambiguous/file/dependency\": could not resolve child component \"dependency\" (ambiguous)"}
+    );
 }
 
 TEST_CASE_FIXTURE(ReplWithPathFixture, "RequireWithDirectoryAmbiguity")
@@ -379,7 +390,9 @@ TEST_CASE_FIXTURE(ReplWithPathFixture, "RequireWithDirectoryAmbiguity")
     std::string ambiguousPath = getLuauDirectory(PathType::Relative) + "/tests/require/without_config/ambiguous_directory_requirer";
 
     runProtectedRequire(ambiguousPath);
-    assertOutputContainsAll({"false", "require path could not be resolved to a unique file"});
+    assertOutputContainsAll(
+        {"false", "error requiring module \"./ambiguous/directory/dependency\": could not resolve child component \"dependency\" (ambiguous)"}
+    );
 }
 
 TEST_CASE_FIXTURE(ReplWithPathFixture, "CheckCacheAfterRequireLuau")
@@ -463,6 +476,85 @@ TEST_CASE_FIXTURE(ReplWithPathFixture, "CheckCachedResult")
     std::string relativePath = getLuauDirectory(PathType::Relative) + "/tests/require/without_config/validate_cache";
     runProtectedRequire(relativePath);
     assertOutputContainsAll({"true"});
+}
+
+TEST_CASE_FIXTURE(ReplWithPathFixture, "CheckClearCacheEntry")
+{
+    std::string relativePath = getLuauDirectory(PathType::Relative) + "/tests/require/without_config/module";
+    std::string absolutePath = getLuauDirectory(PathType::Absolute) + "/tests/require/without_config/module";
+    std::string cacheKey = absolutePath + ".luau";
+
+    luaL_findtable(L, LUA_REGISTRYINDEX, "_MODULES", 1);
+    lua_getfield(L, -1, cacheKey.c_str());
+    REQUIRE_MESSAGE(lua_isnil(L, -1), "Cache already contained module result");
+
+    runProtectedRequire(relativePath);
+
+    assertOutputContainsAll({"true", "result from dependency", "required into module"});
+
+    // Check cache for the absolute path as a cache key
+    luaL_findtable(L, LUA_REGISTRYINDEX, "_MODULES", 1);
+    lua_getfield(L, -1, cacheKey.c_str());
+    REQUIRE_FALSE_MESSAGE(lua_isnil(L, -1), "Cache did not contain module result");
+
+    lua_pushcfunction(L, luarequire_clearcacheentry, nullptr);
+    lua_pushstring(L, cacheKey.c_str());
+    lua_call(L, 1, 0);
+
+    luaL_findtable(L, LUA_REGISTRYINDEX, "_MODULES", 1);
+    lua_getfield(L, -1, cacheKey.c_str());
+    REQUIRE_MESSAGE(lua_isnil(L, -1), "Cache was not cleared");
+}
+
+TEST_CASE_FIXTURE(ReplWithPathFixture, "CheckClearCache")
+{
+    std::string relativePath = getLuauDirectory(PathType::Relative) + "/tests/require/without_config/module";
+    std::string absolutePath = getLuauDirectory(PathType::Absolute) + "/tests/require/without_config/module";
+    std::string cacheKey = absolutePath + ".luau";
+
+    luaL_findtable(L, LUA_REGISTRYINDEX, "_MODULES", 1);
+    lua_getfield(L, -1, cacheKey.c_str());
+    REQUIRE_MESSAGE(lua_isnil(L, -1), "Cache already contained module result");
+
+    runProtectedRequire(relativePath);
+
+    assertOutputContainsAll({"true", "result from dependency", "required into module"});
+
+    // Check cache for the absolute path as a cache key
+    luaL_findtable(L, LUA_REGISTRYINDEX, "_MODULES", 1);
+    lua_getfield(L, -1, cacheKey.c_str());
+    REQUIRE_FALSE_MESSAGE(lua_isnil(L, -1), "Cache did not contain module result");
+
+    lua_pushcfunction(L, luarequire_clearcache, nullptr);
+    lua_call(L, 0, 0);
+
+    luaL_findtable(L, LUA_REGISTRYINDEX, "_MODULES", 1);
+    lua_getfield(L, -1, cacheKey.c_str());
+    REQUIRE_MESSAGE(lua_isnil(L, -1), "Cache was not cleared");
+}
+
+TEST_CASE_FIXTURE(ReplWithPathFixture, "RegisterRuntimeModule")
+{
+    lua_pushcfunction(L, luarequire_registermodule, nullptr);
+    lua_pushstring(L, "@test/helloworld");
+    lua_newtable(L);
+    lua_pushstring(L, "hello");
+    lua_pushstring(L, "world");
+    lua_settable(L, -3);
+    lua_call(L, 2, 0);
+
+    runCode(L, "return require('@test/helloworld').hello == 'world'");
+    assertOutputContainsAll({"true"});
+}
+
+TEST_CASE_FIXTURE(ReplWithPathFixture, "ProxyRequire")
+{
+    luarequire_pushproxyrequire(L, requireConfigInit, createCliRequireContext(L));
+    lua_setglobal(L, "proxyrequire");
+
+    std::string path = getLuauDirectory(PathType::Relative) + "/tests/require/without_config/proxy_requirer";
+    runProtectedRequire(path);
+    assertOutputContainsAll({"true", "result from dependency", "required into proxy_requirer"});
 }
 
 TEST_CASE_FIXTURE(ReplWithPathFixture, "LoadStringRelative")

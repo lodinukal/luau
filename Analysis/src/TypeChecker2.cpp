@@ -30,10 +30,11 @@
 
 LUAU_FASTFLAG(DebugLuauMagicTypes)
 
-LUAU_FASTFLAG(LuauFreeTypesMustHaveBounds)
-LUAU_FASTFLAGVARIABLE(LuauImproveTypePathsInErrors)
 LUAU_FASTFLAG(LuauUserTypeFunTypecheck)
 LUAU_FASTFLAGVARIABLE(LuauTypeCheckerAcceptNumberConcats)
+LUAU_FASTFLAGVARIABLE(LuauTypeCheckerStricterIndexCheck)
+LUAU_FASTFLAG(LuauStoreReturnTypesAsPackOnAst)
+LUAU_FASTFLAGVARIABLE(LuauReportSubtypingErrors)
 
 namespace Luau
 {
@@ -661,7 +662,7 @@ void TypeChecker2::visit(AstStat* stat)
         return visit(s);
     else if (auto s = stat->as<AstStatDeclareGlobal>())
         return visit(s);
-    else if (auto s = stat->as<AstStatDeclareClass>())
+    else if (auto s = stat->as<AstStatDeclareExternType>())
         return visit(s);
     else if (auto s = stat->as<AstStatError>())
         return visit(s);
@@ -1221,7 +1222,10 @@ void TypeChecker2::visit(AstStatDeclareFunction* stat)
 {
     visitGenerics(stat->generics, stat->genericPacks);
     visit(stat->params);
-    visit(stat->retTypes);
+    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
+        visit(stat->retTypes);
+    else
+        visit(stat->retTypes_DEPRECATED);
 }
 
 void TypeChecker2::visit(AstStatDeclareGlobal* stat)
@@ -1229,9 +1233,9 @@ void TypeChecker2::visit(AstStatDeclareGlobal* stat)
     visit(stat->type);
 }
 
-void TypeChecker2::visit(AstStatDeclareClass* stat)
+void TypeChecker2::visit(AstStatDeclareExternType* stat)
 {
-    for (const AstDeclaredClassProp& prop : stat->props)
+    for (const AstDeclaredExternTypeProperty& prop : stat->props)
         visit(prop.ty);
 }
 
@@ -1319,8 +1323,21 @@ void TypeChecker2::visit(AstExprConstantBool* expr)
     NotNull<Scope> scope{findInnermostScope(expr->location)};
 
     const SubtypingResult r = subtyping->isSubtype(bestType, inferredType, scope);
-    if (!r.isSubtype && !isErrorSuppressing(expr->location, inferredType))
-        reportError(TypeMismatch{inferredType, bestType}, expr->location);
+    if (FFlag::LuauReportSubtypingErrors)
+    {
+        if (!isErrorSuppressing(expr->location, inferredType))
+        {
+            if (!r.isSubtype)
+                reportError(TypeMismatch{inferredType, bestType}, expr->location);
+
+            reportErrors(r.errors);
+        }
+    }
+    else
+    {
+        if (!r.isSubtype && !isErrorSuppressing(expr->location, inferredType))
+            reportError(TypeMismatch{inferredType, bestType}, expr->location);
+    }
 }
 
 void TypeChecker2::visit(AstExprConstantNumber* expr)
@@ -1344,8 +1361,21 @@ void TypeChecker2::visit(AstExprConstantString* expr)
     NotNull<Scope> scope{findInnermostScope(expr->location)};
 
     const SubtypingResult r = subtyping->isSubtype(bestType, inferredType, scope);
-    if (!r.isSubtype && !isErrorSuppressing(expr->location, inferredType))
-        reportError(TypeMismatch{inferredType, bestType}, expr->location);
+    if (FFlag::LuauReportSubtypingErrors)
+    {
+        if (!isErrorSuppressing(expr->location, inferredType))
+        {
+            if (!r.isSubtype)
+                reportError(TypeMismatch{inferredType, bestType}, expr->location);
+
+            reportErrors(r.errors);
+        }
+    }
+    else
+    {
+        if (!r.isSubtype && !isErrorSuppressing(expr->location, inferredType))
+            reportError(TypeMismatch{inferredType, bestType}, expr->location);
+    }
 }
 
 void TypeChecker2::visit(AstExprLocal* expr)
@@ -1412,6 +1442,12 @@ void TypeChecker2::visitCall(AstExprCall* call)
         SubtypingResult result = subtyping->isSubtype(*originalCallTy, *selectedOverloadTy, scope);
         if (result.isSubtype)
             fnTy = follow(*selectedOverloadTy);
+
+        if (FFlag::LuauReportSubtypingErrors)
+        {
+            if (!isErrorSuppressing(call->location, *selectedOverloadTy))
+                reportErrors(std::move(result.errors));
+        }
 
         if (result.normalizationTooComplex)
         {
@@ -1675,12 +1711,12 @@ void TypeChecker2::visit(AstExprIndexExpr* indexExpr, ValueContext context)
     {
         return indexExprMetatableHelper(indexExpr, mt, exprType, indexType);
     }
-    else if (auto cls = get<ClassType>(exprType))
+    else if (auto cls = get<ExternType>(exprType))
     {
         if (cls->indexer)
             testIsSubtype(indexType, cls->indexer->indexType, indexExpr->index->location);
         else
-            reportError(DynamicPropertyLookupOnClassesUnsafe{exprType}, indexExpr->location);
+            reportError(DynamicPropertyLookupOnExternTypesUnsafe{exprType}, indexExpr->location);
     }
     else if (get<UnionType>(exprType) && isOptional(exprType))
     {
@@ -1821,8 +1857,16 @@ void TypeChecker2::visit(AstExprFunction* fn)
     visit(fn->body);
 
     // we need to typecheck the return annotation itself, if it exists.
-    if (fn->returnAnnotation)
-        visit(*fn->returnAnnotation);
+    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
+    {
+        if (fn->returnAnnotation)
+            visit(fn->returnAnnotation);
+    }
+    else
+    {
+        if (fn->returnAnnotation_DEPRECATED)
+            visit(*fn->returnAnnotation_DEPRECATED);
+    }
 
 
     // If the function type has a function annotation, we need to see if we can suggest an annotation
@@ -2036,7 +2080,7 @@ TypeId TypeChecker2::visit(AstExprBinary* expr, AstNode* overrideKey)
         // If we're working with things that are not tables, the metatable comparisons above are a little excessive
         // It's ok for one type to have a meta table and the other to not. In that case, we should fall back on
         // checking if the intersection of the types is inhabited. If `typesHaveIntersection` failed due to limits,
-        // TODO: Maybe add more checks here (e.g. for functions, classes, etc)
+        // TODO: Maybe add more checks here (e.g. for functions, extern types, etc)
         if (!(get<TableType>(leftType) || get<TableType>(rightType)))
             if (!leftMt.has_value() || !rightMt.has_value())
                 matches = matches || typesHaveIntersection != NormalizationResult::False;
@@ -2101,10 +2145,7 @@ TypeId TypeChecker2::visit(AstExprBinary* expr, AstNode* overrideKey)
                 }
                 else
                 {
-                    expectedRets = module->internalTypes.addTypePack(
-                        {FFlag::LuauFreeTypesMustHaveBounds ? module->internalTypes.freshType(builtinTypes, scope, TypeLevel{})
-                                                            : module->internalTypes.freshType_DEPRECATED(scope, TypeLevel{})}
-                    );
+                    expectedRets = module->internalTypes.addTypePack({module->internalTypes.freshType(builtinTypes, scope, TypeLevel{})});
                 }
 
                 TypeId expectedTy = module->internalTypes.addType(FunctionType(expectedArgs, expectedRets));
@@ -2367,8 +2408,7 @@ TypeId TypeChecker2::flattenPack(TypePackId pack)
         return *fst;
     else if (auto ftp = get<FreeTypePack>(pack))
     {
-        TypeId result = FFlag::LuauFreeTypesMustHaveBounds ? module->internalTypes.freshType(builtinTypes, ftp->scope)
-                                                           : module->internalTypes.addType(FreeType{ftp->scope});
+        TypeId result = module->internalTypes.freshType(builtinTypes, ftp->scope);
         TypePackId freeTail = module->internalTypes.addTypePack(FreeTypePack{ftp->scope});
 
         TypePack* resultPack = emplaceTypePack<TypePack>(asMutable(pack));
@@ -2613,7 +2653,10 @@ void TypeChecker2::visit(AstTypeFunction* ty)
 {
     visitGenerics(ty->generics, ty->genericPacks);
     visit(ty->argTypes);
-    visit(ty->returnTypes);
+    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
+        visit(ty->returnTypes);
+    else
+        visit(ty->returnTypes_DEPRECATED);
 }
 
 void TypeChecker2::visit(AstTypeTypeof* ty)
@@ -2717,61 +2760,41 @@ Reasonings TypeChecker2::explainReasonings_(TID subTy, TID superTy, Location loc
         if (!subLeafTy && !superLeafTy && !subLeafTp && !superLeafTp)
             ice->ice("Subtyping test returned a reasoning where one path ends at a type and the other ends at a pack.", location);
 
-        if (FFlag::LuauImproveTypePathsInErrors)
-        {
-            std::string relation = "a subtype of";
-            if (reasoning.variance == SubtypingVariance::Invariant)
-                relation = "exactly";
-            else if (reasoning.variance == SubtypingVariance::Contravariant)
-                relation = "a supertype of";
+        std::string relation = "a subtype of";
+        if (reasoning.variance == SubtypingVariance::Invariant)
+            relation = "exactly";
+        else if (reasoning.variance == SubtypingVariance::Contravariant)
+            relation = "a supertype of";
 
-            std::string subLeafAsString = toString(subLeaf);
-            // if the string is empty, it must be an empty type pack
-            if (subLeafAsString.empty())
-                subLeafAsString = "()";
+        std::string subLeafAsString = toString(subLeaf);
+        // if the string is empty, it must be an empty type pack
+        if (subLeafAsString.empty())
+            subLeafAsString = "()";
 
-            std::string superLeafAsString = toString(superLeaf);
-            // if the string is empty, it must be an empty type pack
-            if (superLeafAsString.empty())
-                superLeafAsString = "()";
+        std::string superLeafAsString = toString(superLeaf);
+        // if the string is empty, it must be an empty type pack
+        if (superLeafAsString.empty())
+            superLeafAsString = "()";
 
-            std::stringstream baseReasonBuilder;
-            baseReasonBuilder << "`" << subLeafAsString << "` is not " << relation << " `" << superLeafAsString << "`";
-            std::string baseReason = baseReasonBuilder.str();
+        std::stringstream baseReasonBuilder;
+        baseReasonBuilder << "`" << subLeafAsString << "` is not " << relation << " `" << superLeafAsString << "`";
+        std::string baseReason = baseReasonBuilder.str();
 
-            std::stringstream reason;
+        std::stringstream reason;
 
-            if (reasoning.subPath == reasoning.superPath)
-                reason << toStringHuman(reasoning.subPath) << "`" << subLeafAsString << "` in the former type and `" << superLeafAsString
-                       << "` in the latter type, and " << baseReason;
-            else if (!reasoning.subPath.empty() && !reasoning.superPath.empty())
-                reason << toStringHuman(reasoning.subPath) << "`" << subLeafAsString << "` and " << toStringHuman(reasoning.superPath) << "`"
-                       << superLeafAsString << "`, and " << baseReason;
-            else if (!reasoning.subPath.empty())
-                reason << toStringHuman(reasoning.subPath) << "`" << subLeafAsString << "`, which is not " << relation << " `" << superLeafAsString
-                       << "`";
-            else
-                reason << toStringHuman(reasoning.superPath) << "`" << superLeafAsString << "`, and " << baseReason;
-
-            reasons.push_back(reason.str());
-        }
+        if (reasoning.subPath == reasoning.superPath)
+            reason << toStringHuman(reasoning.subPath) << "`" << subLeafAsString << "` in the former type and `" << superLeafAsString
+                   << "` in the latter type, and " << baseReason;
+        else if (!reasoning.subPath.empty() && !reasoning.superPath.empty())
+            reason << toStringHuman(reasoning.subPath) << "`" << subLeafAsString << "` and " << toStringHuman(reasoning.superPath) << "`"
+                   << superLeafAsString << "`, and " << baseReason;
+        else if (!reasoning.subPath.empty())
+            reason << toStringHuman(reasoning.subPath) << "`" << subLeafAsString << "`, which is not " << relation << " `" << superLeafAsString
+                   << "`";
         else
-        {
-            std::string relation = "a subtype of";
-            if (reasoning.variance == SubtypingVariance::Invariant)
-                relation = "exactly";
-            else if (reasoning.variance == SubtypingVariance::Contravariant)
-                relation = "a supertype of";
+            reason << toStringHuman(reasoning.superPath) << "`" << superLeafAsString << "`, and " << baseReason;
 
-            std::string reason;
-            if (reasoning.subPath == reasoning.superPath)
-                reason = "at " + toString(reasoning.subPath) + ", " + toString(subLeaf) + " is not " + relation + " " + toString(superLeaf);
-            else
-                reason = "type " + toString(subTy) + toString(reasoning.subPath, /* prefixDot */ true) + " (" + toString(subLeaf) + ") is not " +
-                         relation + " " + toString(superTy) + toString(reasoning.superPath, /* prefixDot */ true) + " (" + toString(superLeaf) + ")";
-
-            reasons.push_back(reason);
-        }
+        reasons.push_back(reason.str());
 
         // if we haven't already proved this isn't suppressing, we have to keep checking.
         if (suppressed)
@@ -2839,6 +2862,12 @@ bool TypeChecker2::testIsSubtype(TypeId subTy, TypeId superTy, Location location
     NotNull<Scope> scope{findInnermostScope(location)};
     SubtypingResult r = subtyping->isSubtype(subTy, superTy, scope);
 
+    if (FFlag::LuauReportSubtypingErrors)
+    {
+        if (!isErrorSuppressing(location, subTy))
+            reportErrors(std::move(r.errors));
+    }
+
     if (r.normalizationTooComplex)
         reportError(NormalizationTooComplex{}, location);
 
@@ -2852,6 +2881,12 @@ bool TypeChecker2::testIsSubtype(TypePackId subTy, TypePackId superTy, Location 
 {
     NotNull<Scope> scope{findInnermostScope(location)};
     SubtypingResult r = subtyping->isSubtype(subTy, superTy, scope);
+
+    if (FFlag::LuauReportSubtypingErrors)
+    {
+        if (!isErrorSuppressing(location, subTy))
+            reportErrors(std::move(r.errors));
+    }
 
     if (r.normalizationTooComplex)
         reportError(NormalizationTooComplex{}, location);
@@ -2937,7 +2972,7 @@ PropertyTypes TypeChecker2::lookupProp(
 
     if (normValid)
     {
-        for (const auto& [ty, _negations] : norm->classes.classes)
+        for (const auto& [ty, _negations] : norm->externTypes.externTypes)
         {
             fetch(ty);
 
@@ -3032,10 +3067,10 @@ void TypeChecker2::checkIndexTypeFromType(
         if (propTypes.foundOneProp())
             reportError(MissingUnionProperty{tableTy, propTypes.missingProp, prop}, location);
         // For class LValues, we don't want to report an extension error,
-        // because classes come into being with full knowledge of their
+        // because extern types come into being with full knowledge of their
         // shape. We instead want to report the unknown property error of
         // the `else` branch.
-        else if (context == ValueContext::LValue && !get<ClassType>(tableTy))
+        else if (context == ValueContext::LValue && !get<ExternType>(tableTy))
         {
             const auto lvPropTypes = lookupProp(norm.get(), prop, ValueContext::RValue, location, astIndexExprType, dummy);
             if (lvPropTypes.foundOneProp() && lvPropTypes.noneMissingProp())
@@ -3045,7 +3080,7 @@ void TypeChecker2::checkIndexTypeFromType(
             else
                 reportError(CannotExtendTable{tableTy, CannotExtendTable::Property, prop}, location);
         }
-        else if (context == ValueContext::RValue && !get<ClassType>(tableTy))
+        else if (context == ValueContext::RValue && !get<ExternType>(tableTy))
         {
             const auto rvPropTypes = lookupProp(norm.get(), prop, ValueContext::LValue, location, astIndexExprType, dummy);
             if (rvPropTypes.foundOneProp() && rvPropTypes.noneMissingProp())
@@ -3098,19 +3133,25 @@ PropertyType TypeChecker2::hasIndexTypeFromType(
                 return {NormalizationResult::True, {tt->indexer->indexResultType}};
         }
 
-
-        // if we are in a conditional context, we treat the property as present and `unknown` because
-        // we may be _refining_ `tableTy` to include that property. we will want to revisit this a bit
-        // in the future once luau has support for exact tables since this only applies when inexact.
-        return {inConditional(typeContext) ? NormalizationResult::True : NormalizationResult::False, {builtinTypes->unknownType}};
+        if (FFlag::LuauTypeCheckerStricterIndexCheck)
+        {
+            return {NormalizationResult::False, {builtinTypes->unknownType}};
+        }
+        else
+        {
+            // if we are in a conditional context, we treat the property as present and `unknown` because
+            // we may be _refining_ `tableTy` to include that property. we will want to revisit this a bit
+            // in the future once luau has support for exact tables since this only applies when inexact.
+            return {inConditional(typeContext) ? NormalizationResult::True : NormalizationResult::False, {builtinTypes->unknownType}};
+        }
     }
-    else if (const ClassType* cls = get<ClassType>(ty))
+    else if (const ExternType* cls = get<ExternType>(ty))
     {
         // If the property doesn't exist on the class, we consult the indexer
         // We need to check if the type of the index expression foo (x[foo])
         // is compatible with the indexer's indexType
         // Construct the intersection and test inhabitedness!
-        if (auto property = lookupClassProp(cls, prop))
+        if (auto property = lookupExternTypeProp(cls, prop))
             return {NormalizationResult::True, context == ValueContext::LValue ? property->writeTy : property->readTy};
         if (cls->indexer)
         {
@@ -3183,17 +3224,17 @@ void TypeChecker2::diagnoseMissingTableKey(UnknownProperty* utk, TypeErrorData& 
 
     if (auto ttv = getTableType(utk->table))
         accumulate(ttv->props);
-    else if (auto ctv = get<ClassType>(follow(utk->table)))
+    else if (auto etv = get<ExternType>(follow(utk->table)))
     {
-        while (ctv)
+        while (etv)
         {
-            accumulate(ctv->props);
+            accumulate(etv->props);
 
-            if (!ctv->parent)
+            if (!etv->parent)
                 break;
 
-            ctv = get<ClassType>(*ctv->parent);
-            LUAU_ASSERT(ctv);
+            etv = get<ExternType>(*etv->parent);
+            LUAU_ASSERT(etv);
         }
     }
 

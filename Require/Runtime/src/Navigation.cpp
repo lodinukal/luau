@@ -6,6 +6,8 @@
 #include "lua.h"
 #include "lualib.h"
 
+#include <string>
+
 static constexpr size_t initalFileBufferSize = 1024;
 static constexpr size_t initalIdentifierBufferSize = 64;
 
@@ -60,14 +62,14 @@ bool RuntimeNavigationContext::isModulePresent() const
     return config->is_module_present(L, ctx);
 }
 
-std::optional<std::string> RuntimeNavigationContext::getContents() const
-{
-    return getStringFromCWriter(config->get_contents, initalFileBufferSize);
-}
-
 std::optional<std::string> RuntimeNavigationContext::getChunkname() const
 {
     return getStringFromCWriter(config->get_chunkname, initalIdentifierBufferSize);
+}
+
+std::optional<std::string> RuntimeNavigationContext::getLoadname() const
+{
+    return getStringFromCWriter(config->get_loadname, initalIdentifierBufferSize);
 }
 
 std::optional<std::string> RuntimeNavigationContext::getCacheKey() const
@@ -111,14 +113,16 @@ std::optional<std::string> RuntimeNavigationContext::getStringFromCWriter(
 }
 
 
-RuntimeErrorHandler::RuntimeErrorHandler(lua_State* L)
+RuntimeErrorHandler::RuntimeErrorHandler(lua_State* L, std::string requiredPath)
     : L(L)
+    , errorPrefix("error requiring module \"" + std::move(requiredPath) + "\": ")
 {
 }
 
 void RuntimeErrorHandler::reportError(std::string message)
 {
-    luaL_errorL(L, "%s", message.c_str());
+    std::string fullError = errorPrefix + std::move(message);
+    luaL_errorL(L, "%s", fullError.c_str());
 }
 
 } // namespace Luau::Require

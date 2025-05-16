@@ -19,7 +19,7 @@ LUAU_FASTFLAG(LuauSolverV2)
 LUAU_FASTFLAG(LuauAttribute)
 LUAU_FASTFLAGVARIABLE(LintRedundantNativeAttribute)
 
-LUAU_FASTFLAG(LuauDeprecatedAttribute)
+LUAU_FASTFLAG(LuauStoreReturnTypesAsPackOnAst)
 
 namespace Luau
 {
@@ -906,6 +906,11 @@ private:
     bool visit(AstType* node) override
     {
         return true;
+    }
+
+    bool visit(AstTypePack* node) override
+    {
+        return FFlag::LuauStoreReturnTypesAsPackOnAst;
     }
 
     bool visit(AstTypeReference* node) override
@@ -1970,6 +1975,11 @@ private:
         return true;
     }
 
+    bool visit(AstTypePack* node) override
+    {
+        return FFlag::LuauStoreReturnTypesAsPackOnAst;
+    }
+
     bool visit(AstTypeTable* node) override
     {
         if (FFlag::LuauSolverV2)
@@ -2284,53 +2294,36 @@ private:
 
     bool visit(AstExprLocal* node) override
     {
-        if (FFlag::LuauDeprecatedAttribute)
-        {
-
             const FunctionType* fty = getFunctionType(node);
             bool shouldReport = fty && fty->isDeprecatedFunction && !inScope(fty);
 
             if (shouldReport)
                 report(node->location, node->local->name.value);
-        }
 
         return true;
     }
 
     bool visit(AstExprGlobal* node) override
     {
-        if (FFlag::LuauDeprecatedAttribute)
-        {
             const FunctionType* fty = getFunctionType(node);
             bool shouldReport = fty && fty->isDeprecatedFunction && !inScope(fty);
 
             if (shouldReport)
                 report(node->location, node->name.value);
-        }
 
         return true;
     }
 
     bool visit(AstStatLocalFunction* node) override
     {
-        if (FFlag::LuauDeprecatedAttribute)
-        {
             check(node->func);
             return false;
-        }
-        else
-            return true;
     }
 
     bool visit(AstStatFunction* node) override
     {
-        if (FFlag::LuauDeprecatedAttribute)
-        {
             check(node->func);
             return false;
-        }
-        else
-            return true;
     }
 
     bool visit(AstExprIndexName* node) override
@@ -2372,15 +2365,15 @@ private:
 
     void check(AstExprIndexName* node, TypeId ty)
     {
-        if (const ClassType* cty = get<ClassType>(ty))
+        if (const ExternType* cty = get<ExternType>(ty))
         {
-            const Property* prop = lookupClassProp(cty, node->index.value);
-
-            if (prop && prop->deprecated)
-                report(node->location, *prop, cty->name.c_str(), node->index.value);
-            else if (FFlag::LuauDeprecatedAttribute && prop)
+            if (const Property* prop = lookupExternTypeProp(cty, node->index.value))
             {
-                if (std::optional<TypeId> ty = prop->readTy)
+                if (prop->deprecated)
+                {
+                    report(node->location, *prop, cty->name.c_str(), node->index.value);
+                }
+                else if (std::optional<TypeId> ty = prop->readTy)
                 {
                     const FunctionType* fty = get<FunctionType>(follow(ty));
                     bool shouldReport = fty && fty->isDeprecatedFunction && !inScope(fty);
@@ -2412,7 +2405,7 @@ private:
                     else
                         report(node->location, prop->second, tty->name ? tty->name->c_str() : nullptr, node->index.value);
                 }
-                else if (FFlag::LuauDeprecatedAttribute)
+                else
                 {
                     if (std::optional<TypeId> ty = prop->second.readTy)
                     {
@@ -2451,7 +2444,6 @@ private:
 
     void check(AstExprFunction* func)
     {
-        LUAU_ASSERT(FFlag::LuauDeprecatedAttribute);
         LUAU_ASSERT(func);
 
         const FunctionType* fty = getFunctionType(func);
@@ -2481,8 +2473,6 @@ private:
 
     void report(const Location& location, const char* tableName, const char* functionName)
     {
-        LUAU_ASSERT(FFlag::LuauDeprecatedAttribute);
-
         if (tableName)
             emitWarning(*context, LintWarning::Code_DeprecatedApi, location, "Member '%s.%s' is deprecated", tableName, functionName);
         else
@@ -2491,8 +2481,6 @@ private:
 
     void report(const Location& location, const char* functionName)
     {
-        LUAU_ASSERT(FFlag::LuauDeprecatedAttribute);
-
         emitWarning(*context, LintWarning::Code_DeprecatedApi, location, "Function '%s' is deprecated", functionName);
     }
 
@@ -2500,7 +2488,6 @@ private:
 
     void pushScope(const FunctionType* fty)
     {
-        LUAU_ASSERT(FFlag::LuauDeprecatedAttribute);
         LUAU_ASSERT(fty);
 
         functionTypeScopeStack.push_back(fty);
@@ -2508,7 +2495,6 @@ private:
 
     void popScope(const FunctionType* fty)
     {
-        LUAU_ASSERT(FFlag::LuauDeprecatedAttribute);
         LUAU_ASSERT(fty);
 
         LUAU_ASSERT(fty == functionTypeScopeStack.back());
@@ -2517,7 +2503,6 @@ private:
 
     bool inScope(const FunctionType* fty) const
     {
-        LUAU_ASSERT(FFlag::LuauDeprecatedAttribute);
         LUAU_ASSERT(fty);
 
         return std::find(functionTypeScopeStack.begin(), functionTypeScopeStack.end(), fty) != functionTypeScopeStack.end();
@@ -2525,8 +2510,6 @@ private:
 
     const FunctionType* getFunctionType(AstExpr* node)
     {
-        LUAU_ASSERT(FFlag::LuauDeprecatedAttribute);
-
         std::optional<TypeId> ty = context->getType(node);
         if (!ty)
             return nullptr;

@@ -18,6 +18,7 @@ LUAU_DYNAMIC_FASTINT(LuauTypeFamilyApplicationCartesianProductLimit)
 LUAU_FASTFLAG(LuauIndexTypeFunctionFunctionMetamethods)
 LUAU_FASTFLAG(LuauMetatableTypeFunctions)
 LUAU_FASTFLAG(LuauMetatablesHaveLength)
+LUAU_FASTFLAG(DebugLuauGreedyGeneralization)
 LUAU_FASTFLAG(LuauIndexAnyIsAny)
 LUAU_FASTFLAG(LuauNewTypeFunReductionChecks2)
 LUAU_FASTFLAG(LuauHasPropProperBlock)
@@ -592,7 +593,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "rawkeyof_type_function_never_for_empty_table
     CHECK(toString(requireType("foo")) == "never");
 }
 
-TEST_CASE_FIXTURE(ClassFixture, "keyof_type_function_works_on_classes")
+TEST_CASE_FIXTURE(ExternTypeFixture, "keyof_type_function_works_on_extern_types")
 {
     if (!FFlag::LuauSolverV2)
         return;
@@ -612,7 +613,7 @@ TEST_CASE_FIXTURE(ClassFixture, "keyof_type_function_works_on_classes")
     CHECK_EQ("\"BaseField\" | \"BaseMethod\" | \"Touched\"", toString(tpm->givenTp));
 }
 
-TEST_CASE_FIXTURE(ClassFixture, "keyof_type_function_errors_if_it_has_nonclass_part")
+TEST_CASE_FIXTURE(ExternTypeFixture, "keyof_type_function_errors_if_it_has_nonclass_part")
 {
     if (!FFlag::LuauSolverV2)
         return;
@@ -629,7 +630,7 @@ TEST_CASE_FIXTURE(ClassFixture, "keyof_type_function_errors_if_it_has_nonclass_p
     CHECK(toString(result.errors[1]) == "Type 'BaseClass | boolean' does not have keys, so 'keyof<BaseClass | boolean>' is invalid");
 }
 
-TEST_CASE_FIXTURE(ClassFixture, "keyof_type_function_common_subset_if_union_of_differing_classes")
+TEST_CASE_FIXTURE(ExternTypeFixture, "keyof_type_function_common_subset_if_union_of_differing_extern_types")
 {
     if (!FFlag::LuauSolverV2)
         return;
@@ -643,7 +644,7 @@ TEST_CASE_FIXTURE(ClassFixture, "keyof_type_function_common_subset_if_union_of_d
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
-TEST_CASE_FIXTURE(ClassFixture, "keyof_type_function_works_with_parent_classes_too")
+TEST_CASE_FIXTURE(ExternTypeFixture, "keyof_type_function_works_with_parent_extern_types_too")
 {
     if (!FFlag::LuauSolverV2)
         return;
@@ -657,7 +658,7 @@ TEST_CASE_FIXTURE(ClassFixture, "keyof_type_function_works_with_parent_classes_t
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
-TEST_CASE_FIXTURE(ClassFixture, "binary_type_function_works_with_default_argument")
+TEST_CASE_FIXTURE(ExternTypeFixture, "binary_type_function_works_with_default_argument")
 {
     if (!FFlag::LuauSolverV2)
         return;
@@ -672,7 +673,7 @@ TEST_CASE_FIXTURE(ClassFixture, "binary_type_function_works_with_default_argumen
     CHECK("() -> number" == toString(requireType("thunk")));
 }
 
-TEST_CASE_FIXTURE(ClassFixture, "vector2_multiply_is_overloaded")
+TEST_CASE_FIXTURE(ExternTypeFixture, "vector2_multiply_is_overloaded")
 {
     if (!FFlag::LuauSolverV2)
         return;
@@ -1246,7 +1247,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "index_type_function_rfc_alternative_section"
     CHECK(toString(result.errors[0]) == "Property '\"b\"' does not exist on type 'MyObject'");
 }
 
-TEST_CASE_FIXTURE(ClassFixture, "index_type_function_works_on_classes")
+TEST_CASE_FIXTURE(ExternTypeFixture, "index_type_function_works_on_extern_types")
 {
     if (!FFlag::LuauSolverV2)
         return;
@@ -1260,7 +1261,7 @@ TEST_CASE_FIXTURE(ClassFixture, "index_type_function_works_on_classes")
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
-TEST_CASE_FIXTURE(ClassFixture, "index_type_function_works_on_classes_with_parents")
+TEST_CASE_FIXTURE(ExternTypeFixture, "index_type_function_works_on_extern_types_with_parents")
 {
     if (!FFlag::LuauSolverV2)
         return;
@@ -1405,7 +1406,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "rawget_type_function_works_w_index_metatable
     CHECK(toString(result.errors[1]) == "Property '\"Bar\" | \"Foo\"' does not exist on type 'exampleClass3'");
 }
 
-TEST_CASE_FIXTURE(ClassFixture, "rawget_type_function_errors_w_classes")
+TEST_CASE_FIXTURE(ExternTypeFixture, "rawget_type_function_errors_w_extern_types")
 {
     if (!FFlag::LuauSolverV2)
         return;
@@ -1672,6 +1673,72 @@ print(test.a)
         toString(result.errors[0])
     );
     CHECK("Type 'add<string, string>' does not have key 'a'" == toString(result.errors[1]));
+}
+
+struct TFFixture
+{
+    TypeArena arena_;
+    NotNull<TypeArena> arena{&arena_};
+
+    BuiltinTypes builtinTypes_;
+    NotNull<BuiltinTypes> builtinTypes{&builtinTypes_};
+
+    ScopePtr globalScope = std::make_shared<Scope>(builtinTypes->anyTypePack);
+
+    InternalErrorReporter ice;
+    UnifierSharedState unifierState{&ice};
+    SimplifierPtr simplifier = EqSatSimplification::newSimplifier(arena, builtinTypes);
+    Normalizer normalizer{arena, builtinTypes, NotNull{&unifierState}};
+    TypeCheckLimits limits;
+    TypeFunctionRuntime runtime{NotNull{&ice}, NotNull{&limits}};
+
+    const ScopedFastFlag sff[1] = {
+        {FFlag::DebugLuauGreedyGeneralization, true},
+    };
+
+    BuiltinTypeFunctions builtinTypeFunctions;
+
+    TypeFunctionContext tfc{
+        arena,
+        builtinTypes,
+        NotNull{globalScope.get()},
+        NotNull{simplifier.get()},
+        NotNull{&normalizer},
+        NotNull{&runtime},
+        NotNull{&ice},
+        NotNull{&limits}
+    };
+};
+
+TEST_CASE_FIXTURE(TFFixture, "refine<G, ~(false?)>")
+{
+    TypeId g = arena->addType(GenericType{globalScope.get(), Polarity::Negative});
+
+    TypeId refineTy = arena->addType(TypeFunctionInstanceType{
+        builtinTypeFunctions.refineFunc, {g, builtinTypes->truthyType}
+    });
+
+    FunctionGraphReductionResult res = reduceTypeFunctions(refineTy, Location{}, tfc);
+
+    CHECK(res.reducedTypes.size() == 1);
+
+    CHECK(res.errors.size() == 0);
+    CHECK(res.irreducibleTypes.size() == 0);
+    CHECK(res.blockedTypes.size() == 0);
+}
+
+TEST_CASE_FIXTURE(TFFixture, "or<'a, 'b>")
+{
+    TypeId aType = arena->freshType(builtinTypes, globalScope.get());
+    TypeId bType = arena->freshType(builtinTypes, globalScope.get());
+
+    TypeId orType = arena->addType(TypeFunctionInstanceType{
+        builtinTypeFunctions.orFunc, {aType, bType}
+    });
+
+    FunctionGraphReductionResult res = reduceTypeFunctions(orType, Location{}, tfc);
+
+    CHECK(res.reducedTypes.size() == 1);
 }
 
 TEST_SUITE_END();

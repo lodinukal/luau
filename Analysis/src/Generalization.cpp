@@ -15,7 +15,6 @@
 #include "Luau/VisitType.h"
 
 LUAU_FASTFLAG(DebugLuauGreedyGeneralization)
-LUAU_FASTFLAG(LuauAutocompleteRefactorsForIncrementalAutocomplete)
 
 LUAU_FASTFLAGVARIABLE(LuauNonReentrantGeneralization2)
 
@@ -549,7 +548,7 @@ struct FreeTypeSearcher : TypeVisitor
                 traverse(*prop.readTy);
             else
             {
-                LUAU_ASSERT(prop.isShared() || FFlag::LuauAutocompleteRefactorsForIncrementalAutocomplete);
+                LUAU_ASSERT(prop.isShared());
 
                 Polarity p = polarity;
                 polarity = Polarity::Mixed;
@@ -605,7 +604,7 @@ struct FreeTypeSearcher : TypeVisitor
         return false;
     }
 
-    bool visit(TypeId, const ClassType&) override
+    bool visit(TypeId, const ExternType&) override
     {
         return false;
     }
@@ -897,7 +896,7 @@ struct TypeCacher : TypeOnceVisitor
         return false;
     }
 
-    bool visit(TypeId ty, const ClassType&) override
+    bool visit(TypeId ty, const ExternType&) override
     {
         cache(ty);
         return false;
@@ -1404,7 +1403,10 @@ std::optional<TypeId> generalize(
         }
 
         for (TypeId unsealedTableTy : fts.unsealedTables)
-            sealTable(scope, unsealedTableTy);
+        {
+            if (!generalizationTarget || unsealedTableTy == *generalizationTarget)
+                sealTable(scope, unsealedTableTy);
+        }
 
         for (const auto& [freePackId, params] : fts.typePacks)
         {
@@ -1464,29 +1466,93 @@ std::optional<TypeId> generalize(
 
 struct GenericCounter : TypeVisitor
 {
+    struct CounterState
+    {
+        size_t count = 0;
+        Polarity polarity = Polarity::None;
+    };
+
     NotNull<DenseHashSet<TypeId>> cachedTypes;
-    DenseHashMap<TypeId, size_t> generics{nullptr};
-    DenseHashMap<TypePackId, size_t> genericPacks{nullptr};
+    DenseHashMap<TypeId, CounterState> generics{nullptr};
+    DenseHashMap<TypePackId, CounterState> genericPacks{nullptr};
+
+    Polarity polarity = Polarity::Positive;
 
     explicit GenericCounter(NotNull<DenseHashSet<TypeId>> cachedTypes)
         : cachedTypes(cachedTypes)
     {
     }
 
+    bool visit(TypeId ty, const FunctionType& ft) override
+    {
+        if (ty->persistent)
+            return false;
+
+        polarity = invert(polarity);
+        traverse(ft.argTypes);
+        polarity = invert(polarity);
+        traverse(ft.retTypes);
+
+        return false;
+    }
+
+    bool visit(TypeId ty, const TableType& tt) override
+    {
+        if (ty->persistent)
+            return false;
+
+        const Polarity previous = polarity;
+
+        for (const auto& [_name, prop] : tt.props)
+        {
+            if (prop.isReadOnly())
+                traverse(*prop.readTy);
+            else
+            {
+                LUAU_ASSERT(prop.isShared());
+
+                polarity = Polarity::Mixed;
+                traverse(prop.type());
+                polarity = previous;
+            }
+        }
+
+        if (tt.indexer)
+        {
+            polarity = Polarity::Mixed;
+            traverse(tt.indexer->indexType);
+            traverse(tt.indexer->indexResultType);
+            polarity = previous;
+        }
+
+        return false;
+    }
+
+    bool visit(TypeId ty, const ExternType&) override
+    {
+        return false;
+    }
+
     bool visit(TypeId ty, const GenericType&) override
     {
-        size_t* count = generics.find(ty);
-        if (count)
-            ++*count;
+        auto state = generics.find(ty);
+        if (state)
+        {
+            ++state->count;
+            state->polarity |= polarity;
+        }
 
         return false;
     }
 
     bool visit(TypePackId tp, const GenericTypePack&) override
     {
-        size_t* count = genericPacks.find(tp);
-        if (count)
-            ++*count;
+        auto state = genericPacks.find(tp);
+        if (state)
+        {
+            ++state->count;
+            state->polarity |= polarity;
+        }
 
         return false;
     }
@@ -1513,66 +1579,86 @@ void pruneUnnecessaryGenerics(
     if (!functionTy)
         return;
 
-    // Types (and packs) to be removed from the generics list
-    DenseHashSet<TypeId> clipTypes{nullptr};
-    DenseHashSet<TypePackId> clipTypePacks{nullptr};
+    // If a generic has no explicit name and is only referred to in one place in
+    // the function's signature, it can be replaced with unknown.
 
     GenericCounter counter{cachedTypes};
     for (TypeId generic : functionTy->generics)
     {
+        generic = follow(generic);
         auto g = get<GenericType>(generic);
-        LUAU_ASSERT(g);
-        if (!g)
-            clipTypes.insert(generic);
-        else if (!g->explicitName)
-            counter.generics[generic] = 0;
+        if (g && !g->explicitName)
+            counter.generics[generic] = {};
     }
-    for (TypePackId genericPack : functionTy->genericPacks)
+
+    // It is sometimes the case that a pack in the generic list will become a
+    // pack that (transitively) has a generic tail.  If it does, we need to add
+    // that generic tail to the generic pack list.
+    for (size_t i = 0; i < functionTy->genericPacks.size(); ++i)
     {
-        auto g = get<GenericTypePack>(genericPack);
-        if (!g)
-            clipTypePacks.insert(genericPack);
-        else if (!g->explicitName)
-            counter.genericPacks[genericPack] = 0;
+        TypePackId genericPack = follow(functionTy->genericPacks[i]);
+
+        TypePackId tail = getTail(genericPack);
+
+        if (tail != genericPack)
+            functionTy->genericPacks.push_back(tail);
+
+        if (auto g = get<GenericTypePack>(tail); g && !g->explicitName)
+            counter.genericPacks[genericPack] = {};
     }
 
     counter.traverse(ty);
 
-    for (const auto& [generic, count] : counter.generics)
+    for (const auto& [generic, state] : counter.generics)
     {
-        if (count == 1)
-        {
+        if (state.count == 1 && state.polarity != Polarity::Mixed)
             emplaceType<BoundType>(asMutable(generic), builtinTypes->unknownType);
-            clipTypes.insert(generic);
-        }
     }
 
+    // Remove duplicates and types that aren't actually generics.
+    DenseHashSet<TypeId> seen{nullptr};
     auto it = std::remove_if(
         functionTy->generics.begin(),
         functionTy->generics.end(),
         [&](TypeId ty)
         {
-            return clipTypes.contains(ty);
+            ty = follow(ty);
+            if (seen.contains(ty))
+                return true;
+            seen.insert(ty);
+
+            auto state = counter.generics.find(ty);
+            if (state && state->count == 0)
+                return true;
+
+            return !get<GenericType>(ty);
         }
     );
 
     functionTy->generics.erase(it, functionTy->generics.end());
 
-    for (const auto& [genericPack, count] : counter.genericPacks)
+    for (const auto& [genericPack, state] : counter.genericPacks)
     {
-        if (count == 1)
-        {
+        if (state.count == 1)
             emplaceTypePack<BoundTypePack>(asMutable(genericPack), builtinTypes->unknownTypePack);
-            clipTypePacks.insert(genericPack);
-        }
     }
 
+    DenseHashSet<TypePackId> seen2{nullptr};
     auto it2 = std::remove_if(
         functionTy->genericPacks.begin(),
         functionTy->genericPacks.end(),
         [&](TypePackId tp)
         {
-            return clipTypePacks.contains(tp);
+            tp = follow(tp);
+            if (seen2.contains(tp))
+                return true;
+            seen2.insert(tp);
+
+            auto state = counter.genericPacks.find(tp);
+            if (state && state->count == 0)
+                return true;
+
+            return !get<GenericTypePack>(tp);
         }
     );
 

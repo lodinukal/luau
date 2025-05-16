@@ -23,30 +23,24 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(LuauAutocompleteRefactorsForIncrementalAutocomplete)
 LUAU_FASTINT(LuauParseErrorLimit)
-LUAU_FASTFLAG(LuauCloneIncrementalModule)
-
-LUAU_FASTFLAG(LuauMixedModeDefFinderTraversesTypeOf)
-LUAU_FASTFLAG(LuauFreeTypesMustHaveBounds)
 
 LUAU_FASTFLAG(LuauBetterReverseDependencyTracking)
 LUAU_FASTFLAG(LuauAutocompleteUsesModuleForTypeCompatibility)
 LUAU_FASTFLAG(LuauBetterCursorInCommentDetection)
 LUAU_FASTFLAG(LuauAllFreeTypesHaveScopes)
-LUAU_FASTFLAG(LuauTrackInteriorFreeTypesOnScope)
 LUAU_FASTFLAG(LuauClonedTableAndFunctionTypesMustHaveScopes)
 LUAU_FASTFLAG(LuauDisableNewSolverAssertsInMixedMode)
 LUAU_FASTFLAG(LuauCloneTypeAliasBindings)
 LUAU_FASTFLAG(LuauDoNotClonePersistentBindings)
-LUAU_FASTFLAG(LuauIncrementalAutocompleteDemandBasedCloning)
 LUAU_FASTFLAG(LuauUserTypeFunTypecheck)
 LUAU_FASTFLAG(LuauBetterScopeSelection)
 LUAU_FASTFLAG(LuauBlockDiffFragmentSelection)
 LUAU_FASTFLAG(LuauFragmentAcMemoryLeak)
 LUAU_FASTFLAG(LuauGlobalVariableModuleIsolation)
+LUAU_FASTFLAG(LuauFragmentAutocompleteIfRecommendations)
 
-static std::optional<AutocompleteEntryMap> nullCallback(std::string tag, std::optional<const ClassType*> ptr, std::optional<std::string> contents)
+static std::optional<AutocompleteEntryMap> nullCallback(std::string tag, std::optional<const ExternType*> ptr, std::optional<std::string> contents)
 {
     return std::nullopt;
 }
@@ -74,20 +68,17 @@ struct FragmentAutocompleteFixtureImpl : BaseType
 {
     static_assert(std::is_base_of_v<Fixture, BaseType>, "BaseType must be a descendant of Fixture");
 
-    ScopedFastFlag luauAutocompleteRefactorsForIncrementalAutocomplete{FFlag::LuauAutocompleteRefactorsForIncrementalAutocomplete, true};
-    ScopedFastFlag luauFreeTypesMustHaveBounds{FFlag::LuauFreeTypesMustHaveBounds, true};
-    ScopedFastFlag luauCloneIncrementalModule{FFlag::LuauCloneIncrementalModule, true};
     ScopedFastFlag luauAllFreeTypesHaveScopes{FFlag::LuauAllFreeTypesHaveScopes, true};
     ScopedFastFlag luauClonedTableAndFunctionTypesMustHaveScopes{FFlag::LuauClonedTableAndFunctionTypesMustHaveScopes, true};
     ScopedFastFlag luauDisableNewSolverAssertsInMixedMode{FFlag::LuauDisableNewSolverAssertsInMixedMode, true};
     ScopedFastFlag luauCloneTypeAliasBindings{FFlag::LuauCloneTypeAliasBindings, true};
     ScopedFastFlag luauDoNotClonePersistentBindings{FFlag::LuauDoNotClonePersistentBindings, true};
-    ScopedFastFlag luauIncrementalAutocompleteDemandBasedCloning{FFlag::LuauIncrementalAutocompleteDemandBasedCloning, true};
     ScopedFastFlag luauBetterScopeSelection{FFlag::LuauBetterScopeSelection, true};
     ScopedFastFlag luauBlockDiffFragmentSelection{FFlag::LuauBlockDiffFragmentSelection, true};
     ScopedFastFlag luauAutocompleteUsesModuleForTypeCompatibility{FFlag::LuauAutocompleteUsesModuleForTypeCompatibility, true};
     ScopedFastFlag luauFragmentAcMemoryLeak{FFlag::LuauFragmentAcMemoryLeak, true};
     ScopedFastFlag luauGlobalVariableModuleIsolation{FFlag::LuauGlobalVariableModuleIsolation, true};
+    ScopedFastFlag luauFragmentAutocompleteIfRecommendations{FFlag::LuauFragmentAutocompleteIfRecommendations, true};
 
     FragmentAutocompleteFixtureImpl()
         : BaseType(true)
@@ -386,7 +377,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "inside_do")
         R"(
 local x = 4
 do
-   
+
 end
 )",
         {3, 3}
@@ -492,7 +483,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "writing_func_annotation")
 {
     auto region = getAutocompleteRegion(
         R"(
-function f(arg1 : T 
+function f(arg1 : T
 )",
         {1, 19}
     );
@@ -755,11 +746,10 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_partial")
 {
     auto region = getAutocompleteRegion(
         R"(
-if 
-)",
-        Position{1, 3}
+if)",
+        Position{1, 2}
     );
-    CHECK_EQ(Location{{1, 0}, {1, 3}}, region.fragmentLocation);
+    CHECK_EQ(Location{{1, 2}, {1, 2}}, region.fragmentLocation);
     REQUIRE(region.parentBlock);
     CHECK(region.nearestStatement->as<AstStatIf>());
 }
@@ -768,11 +758,11 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_partial_in_condition_at")
 {
     auto region = getAutocompleteRegion(
         R"(
-if true 
+if true
 )",
         Position{1, 7}
     );
-    CHECK_EQ(Location{{1, 0}, {1, 7}}, region.fragmentLocation);
+    CHECK_EQ(Location{{1, 3}, {1, 7}}, region.fragmentLocation);
     REQUIRE(region.parentBlock);
     CHECK(region.nearestStatement->as<AstStatIf>());
 }
@@ -781,11 +771,11 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_partial_in_condition_after")
 {
     auto region = getAutocompleteRegion(
         R"(
-if true 
+if true
 )",
         Position{1, 8}
     );
-    CHECK_EQ(Location{{1, 8}, {1, 8}}, region.fragmentLocation);
+    CHECK_EQ(Location{{1, 3}, {1, 8}}, region.fragmentLocation);
     REQUIRE(region.parentBlock);
     CHECK(region.nearestStatement->as<AstStatIf>());
 }
@@ -838,7 +828,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_else_if")
     auto region = getAutocompleteRegion(
         R"(
 if true then
-elseif 
+elseif  
 end
 
 )",
@@ -854,11 +844,11 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_else_if_no_end")
     auto region = getAutocompleteRegion(
         R"(
 if true then
-elseif 
+elseif
 )",
         Position{2, 8}
     );
-    CHECK_EQ(Location{{2, 0}, {2, 8}}, region.fragmentLocation);
+    CHECK_EQ(Location{{2, 8}, {2, 8}}, region.fragmentLocation);
     REQUIRE(region.parentBlock);
     CHECK(region.nearestStatement->as<AstStatIf>());
 }
@@ -1080,7 +1070,7 @@ TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "statement_in_empty_fragment_is_n
     );
     REQUIRE(fragment.has_value());
     CHECK_EQ("", fragment->fragmentToParse);
-    CHECK_EQ(2, fragment->ancestry.size());
+    CHECK_EQ(1, fragment->ancestry.size());
     REQUIRE(fragment->root);
     CHECK_EQ(0, fragment->root->body.size);
     auto statBody = fragment->root->as<AstStatBlock>();
@@ -1113,7 +1103,7 @@ local z = x + y
     CHECK_EQ(Location{Position{3, 0}, Position{3, 15}}, fragment->root->location);
 
     CHECK_EQ("local z = x + y", fragment->fragmentToParse);
-    CHECK_EQ(5, fragment->ancestry.size());
+    CHECK_EQ(4, fragment->ancestry.size());
     REQUIRE(fragment->root);
     CHECK_EQ(1, fragment->root->body.size);
     auto stat = fragment->root->body.data[0]->as<AstStatLocal>();
@@ -1158,7 +1148,7 @@ local y = 5
     REQUIRE(fragment.has_value());
 
     CHECK_EQ("local z = x + y", fragment->fragmentToParse);
-    CHECK_EQ(5, fragment->ancestry.size());
+    CHECK_EQ(4, fragment->ancestry.size());
     REQUIRE(fragment->root);
     CHECK_EQ(Location{Position{2, 0}, Position{2, 15}}, fragment->root->location);
     CHECK_EQ(1, fragment->root->body.size);
@@ -1253,7 +1243,7 @@ abc("bar")
 
     REQUIRE(stringFragment.has_value());
 
-    CHECK_EQ("abc(\"foo\")", stringFragment->fragmentToParse);
+    CHECK_EQ("abc(\"foo\"", stringFragment->fragmentToParse);
     CHECK(stringFragment->nearestStatement);
     CHECK(stringFragment->nearestStatement->is<AstStatExpr>());
 
@@ -1463,7 +1453,7 @@ local tbl = { abc = 1234}
     auto fragment = autocompleteFragment(
         R"(
 local tbl = { abc = 1234}
-tbl. 
+tbl.
 )",
         Position{2, 5}
     );
@@ -1565,8 +1555,6 @@ return module)";
 
     {
         ScopedFastFlag sff{FFlag::LuauSolverV2, false};
-        ScopedFastFlag sff2{FFlag::LuauCloneIncrementalModule, true};
-        ScopedFastFlag sff3{FFlag::LuauFreeTypesMustHaveBounds, true};
         checkAndExamine(source, "module", "{  }");
         fragmentACAndCheck(updated1, Position{1, 17}, "module", "{  }", "{ a: (%error-id%: unknown) -> () }");
         fragmentACAndCheck(updated2, Position{1, 18}, "module", "{  }", "{ ab: (%error-id%: unknown) -> () }");
@@ -1589,7 +1577,7 @@ local tbl = { abc = 1234}
 )";
     const std::string updated = R"(
 local tbl = { abc = 1234}
-tbl. 
+tbl.
 )";
 
     autocompleteFragmentInBothSolvers(
@@ -1644,7 +1632,7 @@ end
 local function f2(a2)
     local l2 = 1;
     g2 = 1;
-end 
+end
 )";
 
     autocompleteFragmentInBothSolvers(
@@ -2785,7 +2773,6 @@ TEST_CASE_FIXTURE(FragmentAutocompleteBuiltinsFixture, "fragment_ac_must_travers
     // This test ensures that we traverse typeof expressions for defs that are being referred to in the fragment
     // In this case, we want to ensure we populate the incremental environment with the reference to `m`
     // Without this, we would ice as we will refer to the local `m` before it's declaration
-    ScopedFastFlag sff{FFlag::LuauMixedModeDefFinderTraversesTypeOf, true};
     const std::string source = R"(
 --!strict
 local m = {}
@@ -2863,7 +2850,6 @@ type V = {h : number, i : U?}
 
 TEST_CASE_FIXTURE(FragmentAutocompleteBuiltinsFixture, "generalization_crash_when_old_solver_freetypes_have_no_bounds_set")
 {
-    ScopedFastFlag sff{FFlag::LuauFreeTypesMustHaveBounds, true};
     const std::string source = R"(
 local UserInputService = game:GetService("UserInputService");
 
@@ -2895,7 +2881,6 @@ end)
 
 TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "fragment_autocomplete_ensures_memory_isolation")
 {
-    ScopedFastFlag sff{FFlag::LuauCloneIncrementalModule, true};
     ToStringOptions opt;
     opt.exhaustive = true;
     opt.exhaustive = true;
@@ -2965,7 +2950,6 @@ return module)";
 
 TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "fragment_autocomplete_shouldnt_crash_on_cross_module_mutation")
 {
-    ScopedFastFlag sff{FFlag::LuauCloneIncrementalModule, true};
     const std::string source = R"(local module = {}
 function module.
 return module
@@ -3027,7 +3011,6 @@ z:a
 
 TEST_CASE_FIXTURE(FragmentAutocompleteBuiltinsFixture, "interior_free_types_assertion_caused_by_free_type_inheriting_null_scope_from_table")
 {
-    ScopedFastFlag sff{FFlag::LuauTrackInteriorFreeTypesOnScope, true};
     const std::string source = R"(--!strict
 local foo
 local a = foo()
@@ -3621,6 +3604,126 @@ end)
 )";
     autocompleteFragmentInBothSolvers(source, dest, Position{5, 11}, [](auto& result) {});
 }
+
+TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_cond_no_then_recs_then")
+{
+    const std::string source = R"(
+
+    )";
+
+    const std::string dest = R"(
+if x t
+    )";
+
+    autocompleteFragmentInBothSolvers(
+        source,
+        dest,
+        Position{1, 6},
+        [](auto& result)
+        {
+            REQUIRE(result.result);
+            CHECK(result.result->acResults.entryMap.count("then"));
+        }
+    );
+}
+
+TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_then_recs_else")
+{
+    const std::string source = R"(
+if x then
+
+end
+    )";
+
+    const std::string dest = R"(
+if x then
+e
+end
+    )";
+
+    autocompleteFragmentInBothSolvers(
+        source,
+        dest,
+        Position{2, 1},
+        [](auto& result)
+        {
+            REQUIRE(result.result);
+            CHECK(result.result->acResults.entryMap.count("else"));
+            CHECK(result.result->acResults.entryMap.count("elseif"));
+        }
+    );
+}
+
+TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_else_if_table_prop_recs_no_then")
+{
+    const std::string source = R"(
+type T = {xa : number, y : number}
+local t : T = {xa = 3, y = 3}
+
+if t.x then
+elseif
+end
+)";
+
+    const std::string dest = R"(
+type T = {xa : number, y : number}
+local t : T = {xa = 3, y = 3}
+
+if t.x then
+elseif t.xa t
+end
+    )";
+
+    autocompleteFragmentInBothSolvers(
+        source,
+        dest,
+        Position{5, 13},
+        [](auto& result)
+        {
+            REQUIRE(result.result);
+            CHECK(!result.result->acResults.entryMap.empty());
+            CHECK(!result.result->acResults.entryMap.count("xa"));
+            CHECK(!result.result->acResults.entryMap.count("y"));
+            CHECK(result.result->acResults.entryMap.count("then"));
+        }
+    );
+}
+
+TEST_CASE_FIXTURE(FragmentAutocompleteFixture, "if_else_if_table_prop_recs_with_then")
+{
+    const std::string source = R"(
+type T = {xa : number, y : number}
+local t : T = {xa = 3, y = 3}
+
+if t.x then
+elseif  then
+end
+)";
+
+    const std::string dest = R"(
+type T = {xa : number, y : number}
+local t : T = {xa = 3, y = 3}
+
+if t.x then
+elseif t.  then
+end
+)";
+
+    autocompleteFragmentInBothSolvers(
+        source,
+        dest,
+        Position{5, 9},
+        [](auto& result)
+        {
+            REQUIRE(result.result);
+            CHECK(!result.result->acResults.entryMap.empty());
+            CHECK(result.result->acResults.entryMap.count("xa"));
+            CHECK(result.result->acResults.entryMap.count("y"));
+            CHECK(!result.result->acResults.entryMap.count("then"));
+        }
+    );
+}
+
 // NOLINTEND(bugprone-unchecked-optional-access)
 
 TEST_SUITE_END();

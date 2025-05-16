@@ -12,7 +12,8 @@
 
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
 LUAU_FASTFLAG(LuauSolverV2)
-LUAU_FASTFLAG(LuauImproveTypePathsInErrors)
+LUAU_FASTFLAG(LuauAddCallConstraintForIterableFunctions)
+LUAU_FASTFLAG(LuauIntersectNotNil)
 
 using namespace Luau;
 
@@ -833,7 +834,15 @@ function clone<X, Y>(dict: {[X]:Y}): {[X]:Y}
 end
     )");
 
-    LUAU_REQUIRE_NO_ERRORS(result);
+    if (FFlag::LuauSolverV2 && FFlag::LuauAddCallConstraintForIterableFunctions && !FFlag::LuauIntersectNotNil)
+    {
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+        CHECK(get<UninhabitedTypeFunction>(result.errors.at(0)));
+    }
+    else
+    {
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "generic_functions_should_be_memory_safe")
@@ -857,12 +866,10 @@ y.a.c = y
         CHECK_EQ(toString(mismatch->givenType), "{ a: { c: T<string>?, d: number }, b: number }");
         CHECK_EQ(toString(mismatch->wantedType), "T<string>");
         std::string reason =
-            (FFlag::LuauImproveTypePathsInErrors)
-                ? "\nthis is because \n\t"
-                  " * accessing `a.d` results in `number` in the former type and `string` in the latter type, and `number` is not exactly "
-                  "`string`\n\t"
-                  " * accessing `b` results in `number` in the former type and `string` in the latter type, and `number` is not exactly `string`"
-                : "at [read \"a\"][read \"d\"], number is not exactly string\n\tat [read \"b\"], number is not exactly string";
+            "\nthis is because \n\t"
+            " * accessing `a.d` results in `number` in the former type and `string` in the latter type, and `number` is not exactly "
+            "`string`\n\t"
+            " * accessing `b` results in `number` in the former type and `string` in the latter type, and `number` is not exactly `string`";
         CHECK_EQ(mismatch->reason, reason);
     }
     else

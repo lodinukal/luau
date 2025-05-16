@@ -15,6 +15,7 @@
 
 LUAU_DYNAMIC_FASTINT(LuauTypeFunctionSerdeIterationLimit)
 LUAU_FASTFLAGVARIABLE(LuauTypeFunReadWriteParents)
+LUAU_FASTFLAGVARIABLE(LuauTypeFunOptional)
 
 namespace Luau
 {
@@ -154,7 +155,7 @@ static std::string getTag(lua_State* L, TypeFunctionTypeId ty)
         return "table";
     else if (get<TypeFunctionFunctionType>(ty))
         return "function";
-    else if (get<TypeFunctionClassType>(ty))
+    else if (get<TypeFunctionExternType>(ty))
         return "class";
     else if (get<TypeFunctionGenericType>(ty))
         return "generic";
@@ -313,6 +314,38 @@ static int getSingletonValue(lua_State* L)
     }
 
     luaL_error(L, "type.value: can't call `value` method on `%s` type", getTag(L, self).c_str());
+}
+
+// Luau: `types.optional(ty: type) -> type`
+// Returns the type instance representing an optional version of `ty`.
+// If `ty` is a union, this adds `nil` to the components of the union.
+// Otherwise, makes a union of the two things.
+static int createOptional(lua_State* L)
+{
+    LUAU_ASSERT(FFlag::LuauTypeFunOptional);
+
+    int argumentCount = lua_gettop(L);
+    if (argumentCount != 1)
+        luaL_error(L, "types.optional: expected 1 argument, but got %d", argumentCount);
+
+    TypeFunctionTypeId argument = getTypeUserData(L, 1);
+
+    std::vector<TypeFunctionTypeId> components;
+
+    if (auto unionTy = get<TypeFunctionUnionType>(argument))
+    {
+        components.reserve(unionTy->components.size() + 1);
+
+        components.insert(components.begin(), unionTy->components.begin(), unionTy->components.end());
+    }
+    else
+        components.emplace_back(argument);
+
+    components.emplace_back(allocateTypeFunctionType(L, TypeFunctionPrimitiveType(TypeFunctionPrimitiveType::NilType)));
+
+    allocTypeUserData(L, TypeFunctionUnionType{components});
+
+    return 1;
 }
 
 // Luau: `types.unionof(...: type) -> type`
@@ -1114,7 +1147,7 @@ static int getClassParent_DEPRECATED(lua_State* L)
         luaL_error(L, "type.parent: expected 1 arguments, but got %d", argumentCount);
 
     TypeFunctionTypeId self = getTypeUserData(L, 1);
-    auto tfct = get<TypeFunctionClassType>(self);
+    auto tfct = get<TypeFunctionExternType>(self);
     if (!tfct)
         luaL_error(L, "type.parent: expected self to be a class, but got %s instead", getTag(L, self).c_str());
 
@@ -1136,7 +1169,7 @@ static int getReadParent(lua_State* L)
         luaL_error(L, "type.parent: expected 1 arguments, but got %d", argumentCount);
 
     TypeFunctionTypeId self = getTypeUserData(L, 1);
-    auto tfct = get<TypeFunctionClassType>(self);
+    auto tfct = get<TypeFunctionExternType>(self);
     if (!tfct)
         luaL_error(L, "type.parent: expected self to be a class, but got %s instead", getTag(L, self).c_str());
 
@@ -1158,7 +1191,7 @@ static int getWriteParent(lua_State* L)
         luaL_error(L, "type.parent: expected 1 arguments, but got %d", argumentCount);
 
     TypeFunctionTypeId self = getTypeUserData(L, 1);
-    auto tfct = get<TypeFunctionClassType>(self);
+    auto tfct = get<TypeFunctionExternType>(self);
     if (!tfct)
         luaL_error(L, "type.parent: expected self to be a class, but got %s instead", getTag(L, self).c_str());
 
@@ -1242,7 +1275,7 @@ static int getProps(lua_State* L)
         return 1;
     }
 
-    if (auto tfct = get<TypeFunctionClassType>(self))
+    if (auto tfct = get<TypeFunctionExternType>(self))
     {
         lua_createtable(L, int(tfct->props.size()), 0);
         for (auto& [name, prop] : tfct->props)
@@ -1305,7 +1338,7 @@ static int getIndexer(lua_State* L)
         return 1;
     }
 
-    if (auto tfct = get<TypeFunctionClassType>(self))
+    if (auto tfct = get<TypeFunctionExternType>(self))
     {
         // if the indexer does not exist, we should return nil
         if (!tfct->indexer.has_value())
@@ -1353,7 +1386,7 @@ static int getReadIndexer(lua_State* L)
         return 1;
     }
 
-    if (auto tfct = get<TypeFunctionClassType>(self))
+    if (auto tfct = get<TypeFunctionExternType>(self))
     {
         // if the indexer does not exist, we should return nil
         if (!tfct->indexer.has_value())
@@ -1399,7 +1432,7 @@ static int getWriteIndexer(lua_State* L)
         return 1;
     }
 
-    if (auto tfct = get<TypeFunctionClassType>(self))
+    if (auto tfct = get<TypeFunctionExternType>(self))
     {
         // if the indexer does not exist, we should return nil
         if (!tfct->indexer.has_value())
@@ -1439,7 +1472,7 @@ static int getMetatable(lua_State* L)
         return 1;
     }
 
-    if (auto tfct = get<TypeFunctionClassType>(self))
+    if (auto tfct = get<TypeFunctionExternType>(self))
     {
         // if the metatable does not exist, we should return nil
         if (!tfct->metatable.has_value())
@@ -1524,6 +1557,7 @@ void registerTypesLibrary(lua_State* L)
         {"copy", deepCopy},
         {"generic", createGeneric},
 
+        {(FFlag::LuauTypeFunOptional) ? "optional" : nullptr, (FFlag::LuauTypeFunOptional) ? createOptional : nullptr},
         {nullptr, nullptr}
     };
 
@@ -1593,7 +1627,7 @@ void registerTypeUserData(lua_State* L)
         // Union and Intersection type methods
         {"components", getComponents},
 
-        // Class type methods
+        //  Extern type methods
         {FFlag::LuauTypeFunReadWriteParents ? "readparent" : "parent", FFlag::LuauTypeFunReadWriteParents ? getReadParent : getClassParent_DEPRECATED},
 
         // Function type methods (cont.)
@@ -1604,7 +1638,7 @@ void registerTypeUserData(lua_State* L)
         {"name", getGenericName},
         {"ispack", getGenericIsPack},
 
-        // move this under Class type methods when removing FFlagLuauTypeFunReadWriteParents
+        // move this under extern type methods when removing FFlagLuauTypeFunReadWriteParents
         {FFlag::LuauTypeFunReadWriteParents ? "writeparent" : nullptr, FFlag::LuauTypeFunReadWriteParents ? getWriteParent : nullptr},
 
         {nullptr, nullptr}
@@ -1903,12 +1937,12 @@ bool areEqual(SeenSet& seen, const TypeFunctionFunctionType& lhs, const TypeFunc
     return true;
 }
 
-bool areEqual(SeenSet& seen, const TypeFunctionClassType& lhs, const TypeFunctionClassType& rhs)
+bool areEqual(SeenSet& seen, const TypeFunctionExternType& lhs, const TypeFunctionExternType& rhs)
 {
     if (seenSetContains(seen, &lhs, &rhs))
         return true;
 
-    return lhs.classTy == rhs.classTy;
+    return lhs.externTy == rhs.externTy;
 }
 
 bool areEqual(SeenSet& seen, const TypeFunctionType& lhs, const TypeFunctionType& rhs)
@@ -1976,8 +2010,8 @@ bool areEqual(SeenSet& seen, const TypeFunctionType& lhs, const TypeFunctionType
     }
 
     {
-        const TypeFunctionClassType* lf = get<TypeFunctionClassType>(&lhs);
-        const TypeFunctionClassType* rf = get<TypeFunctionClassType>(&rhs);
+        const TypeFunctionExternType* lf = get<TypeFunctionExternType>(&lhs);
+        const TypeFunctionExternType* rf = get<TypeFunctionExternType>(&rhs);
         if (lf && rf)
             return areEqual(seen, *lf, *rf);
     }
@@ -2266,7 +2300,7 @@ private:
             TypeFunctionTypePackId emptyTypePack = typeFunctionRuntime->typePackArena.allocate(TypeFunctionTypePack{});
             target = typeFunctionRuntime->typeArena.allocate(TypeFunctionFunctionType{{}, {}, emptyTypePack, emptyTypePack});
         }
-        else if (auto c = get<TypeFunctionClassType>(ty))
+        else if (auto c = get<TypeFunctionExternType>(ty))
             target = ty; // Don't copy a class since they are immutable
         else if (auto g = get<TypeFunctionGenericType>(ty))
             target = typeFunctionRuntime->typeArena.allocate(TypeFunctionGenericType{g->isNamed, g->isPack, g->name});
@@ -2321,7 +2355,7 @@ private:
             cloneChildren(t1, t2);
         else if (auto [f1, f2] = std::tuple{getMutable<TypeFunctionFunctionType>(ty), getMutable<TypeFunctionFunctionType>(tfti)}; f1 && f2)
             cloneChildren(f1, f2);
-        else if (auto [c1, c2] = std::tuple{getMutable<TypeFunctionClassType>(ty), getMutable<TypeFunctionClassType>(tfti)}; c1 && c2)
+        else if (auto [c1, c2] = std::tuple{getMutable<TypeFunctionExternType>(ty), getMutable<TypeFunctionExternType>(tfti)}; c1 && c2)
             cloneChildren(c1, c2);
         else if (auto [g1, g2] = std::tuple{getMutable<TypeFunctionGenericType>(ty), getMutable<TypeFunctionGenericType>(tfti)}; g1 && g2)
             cloneChildren(g1, g2);
@@ -2431,7 +2465,7 @@ private:
         f2->retTypes = shallowClone(f1->retTypes);
     }
 
-    void cloneChildren(TypeFunctionClassType* c1, TypeFunctionClassType* c2)
+    void cloneChildren(TypeFunctionExternType* c1, TypeFunctionExternType* c2)
     {
         // noop.
     }

@@ -157,8 +157,8 @@ private:
     // type function Name ... end
     AstStat* parseTypeFunction(const Location& start, bool exported, Position typeKeywordPosition);
 
-    AstDeclaredClassProp parseDeclaredClassMethod(const AstArray<AstAttr*>& attributes);
-    AstDeclaredClassProp parseDeclaredClassMethod_DEPRECATED();
+    AstDeclaredExternTypeProperty parseDeclaredExternTypeMethod(const AstArray<AstAttr*>& attributes);
+    AstDeclaredExternTypeProperty parseDeclaredExternTypeMethod_DEPRECATED();
 
 
     // `declare global' Name: Type |
@@ -182,12 +182,21 @@ private:
         const Name* localName,
         const AstArray<AstAttr*>& attributes
     );
+    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
+    std::pair<AstExprFunction*, AstLocal*> parseFunctionBody_DEPRECATED(
+        bool hasself,
+        const Lexeme& matchFunction,
+        const AstName& debugname,
+        const Name* localName,
+        const AstArray<AstAttr*>& attributes
+    );
 
     // explist ::= {exp `,'} exp
     void parseExprList(TempVector<AstExpr*>& result, TempVector<Position>* commaPositions = nullptr);
 
     // binding ::= Name [`:` Type]
     Binding parseBinding();
+    AstArray<Position> extractAnnotationColonPositions(const TempVector<Binding>& bindings);
 
     // bindinglist ::= (binding | `...') {`,' bindinglist}
     // Returns the location of the vararg ..., or std::nullopt if the function is not vararg.
@@ -195,7 +204,8 @@ private:
         TempVector<Binding>& result,
         bool allowDot3 = false,
         AstArray<Position>* commaPositions = nullptr,
-        std::optional<Position> initialCommaPosition = std::nullopt
+        Position* initialCommaPosition = nullptr,
+        Position* varargAnnotationColonPosition = nullptr
     );
 
     AstType* parseOptionalType();
@@ -219,8 +229,12 @@ private:
         TempVector<std::optional<Position>>* nameColonPositions = nullptr
     );
 
-    std::optional<AstTypeList> parseOptionalReturnType(Position* returnSpecifierPosition = nullptr);
-    std::pair<Location, AstTypeList> parseReturnType();
+    AstTypePack* parseOptionalReturnType(Position* returnSpecifierPosition = nullptr);
+    AstTypePack* parseReturnType();
+
+    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
+    std::optional<AstTypeList> parseOptionalReturnType_DEPRECATED(Position* returnSpecifierPosition = nullptr);
+    std::pair<Location, AstTypeList> parseReturnType_DEPRECATED();
 
     struct TableIndexerResult
     {
@@ -440,10 +454,12 @@ private:
     {
         Name name;
         AstType* annotation;
+        Position colonPosition;
 
-        explicit Binding(const Name& name, AstType* annotation = nullptr)
+        explicit Binding(const Name& name, AstType* annotation = nullptr, Position colonPosition = {0,0})
             : name(name)
             , annotation(annotation)
+            , colonPosition(colonPosition)
         {
         }
     };
@@ -491,7 +507,7 @@ private:
     std::vector<CstTypeTable::Item> scratchCstTableTypeProps;
     std::vector<AstType*> scratchType;
     std::vector<AstTypeOrPack> scratchTypeOrPack;
-    std::vector<AstDeclaredClassProp> scratchDeclaredClassProps;
+    std::vector<AstDeclaredExternTypeProperty> scratchDeclaredClassProps;
     std::vector<AstExprTable::Item> scratchItem;
     std::vector<CstExprTable::Item> scratchCstItem;
     std::vector<AstArgumentName> scratchArgName;

@@ -20,7 +20,7 @@ struct ReferenceCountInitializer : TypeOnceVisitor
 
     DenseHashSet<TypeId>* result;
 
-    ReferenceCountInitializer(DenseHashSet<TypeId>* result)
+    explicit ReferenceCountInitializer(DenseHashSet<TypeId>* result)
         : result(result)
     {
     }
@@ -43,24 +43,15 @@ struct ReferenceCountInitializer : TypeOnceVisitor
         return false;
     }
 
-    bool visit(TypeId ty, const ClassType&) override
+    bool visit(TypeId ty, const ExternType&) override
     {
-        // ClassTypes never contain free types.
+        // ExternTypes never contain free types.
         return false;
     }
 
     bool visit(TypeId, const TypeFunctionInstanceType&) override
     {
-        // We do not consider reference counted types that are inside a type
-        // function to be part of the reachable reference counted types.
-        // Otherwise, code can be constructed in just the right way such
-        // that two type functions both claim to mutate a free type, which
-        // prevents either type function from trying to generalize it, so
-        // we potentially get stuck.
-        //
-        // The default behavior here is `true` for "visit the child types"
-        // of this type, hence:
-        return false;
+        return FFlag::DebugLuauGreedyGeneralization;
     }
 };
 
@@ -130,8 +121,10 @@ DenseHashSet<TypeId> Constraint::getMaybeMutatedFreeTypes() const
     }
     else if (auto hic = get<HasIndexerConstraint>(*this))
     {
+        if (FFlag::DebugLuauGreedyGeneralization)
+            rci.traverse(hic->subjectType);
         rci.traverse(hic->resultType);
-        // `HasIndexerConstraint` should not mutate `subjectType` or `indexType`.
+        // `HasIndexerConstraint` should not mutate `indexType`.
     }
     else if (auto apc = get<AssignPropConstraint>(*this))
     {
@@ -149,6 +142,10 @@ DenseHashSet<TypeId> Constraint::getMaybeMutatedFreeTypes() const
         for (TypeId ty : uc->resultPack)
             rci.traverse(ty);
         // `UnpackConstraint` should not mutate `sourcePack`.
+    }
+    else if (auto rpc = get<ReduceConstraint>(*this); FFlag::DebugLuauGreedyGeneralization && rpc)
+    {
+        rci.traverse(rpc->ty);
     }
     else if (auto rpc = get<ReducePackConstraint>(*this))
     {
