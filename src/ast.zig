@@ -538,7 +538,9 @@ pub const cst = struct {
         openGenericsPosition: Position,
         genericsCommaPositions: Array(Position),
         closeGenericsPosition: Position,
+        argsAnnotationColonPositions: Array(Position),
         argsCommaPositions: Array(Position),
+        varargAnnotationColonPosition: Position,
         returnSpecifierPosition: Position,
     };
 
@@ -623,6 +625,7 @@ pub const cst = struct {
         vtable: *const anyopaque,
         classIndex: CstNode.Kind,
 
+        varsAnnotationColonPositions: Array(Position),
         varsCommaPositions: Array(Position),
         valuesCommaPositions: Array(Position),
     };
@@ -631,6 +634,7 @@ pub const cst = struct {
         vtable: *const anyopaque,
         classIndex: CstNode.Kind,
 
+        annotationColonPosition: Position,
         equalsPosition: Position,
         endCommaPosition: Position,
         stepCommaPosition: Optional(Position),
@@ -640,6 +644,7 @@ pub const cst = struct {
         vtable: *const anyopaque,
         classIndex: CstNode.Kind,
 
+        varsAnnotationColonPositions: Array(Position),
         varsCommaPositions: Array(Position),
         valuesCommaPositions: Array(Position),
     };
@@ -796,6 +801,7 @@ pub const cst = struct {
         vtable: *const anyopaque,
         classIndex: CstNode.Kind,
 
+        hasParentheses: bool,
         openParenthesesPosition: Position,
         closeParenthesesPosition: Position,
         commaPositions: Array(Position),
@@ -857,7 +863,7 @@ pub const Node = extern struct {
         stat_type_function,
         stat_declare_global,
         stat_declare_function,
-        stat_declare_class,
+        stat_declare_extern_type,
         type_reference,
         type_table,
         type_function,
@@ -918,7 +924,7 @@ pub const Node = extern struct {
                 .stat_type_function => StatTypeFunction,
                 .stat_declare_global => StatDeclareGlobal,
                 .stat_declare_function => StatDeclareFunction,
-                .stat_declare_class => StatDeclareClass,
+                .stat_declare_extern_type => StatDeclareExternType,
                 .type_reference => TypeReference,
                 .type_table => TypeTable,
                 .type_function => TypeFunction,
@@ -1116,7 +1122,9 @@ pub const ExprFunction = extern struct {
     genericPacks: Array(*GenericTypePack),
     self: *Local,
     args: Array(*Local),
-    returnAnnotation: Optional(TypeList),
+    returnAnnotation_DEPRECATED: Optional(TypeList),
+    /// *AstTypePack
+    returnAnnotation: ?*Node,
     vararg: bool = false,
     varargLocation: Location,
     varargAnnotation: *Node,
@@ -1480,10 +1488,12 @@ pub const StatDeclareFunction = extern struct {
     paramNames: Array(ArgumentName),
     vararg: bool = false,
     varargLocation: Location,
-    retTypes: TypeList,
+    /// *AstTypePack
+    retTypes: *Node,
+    retTypes_DEPRECATED: TypeList,
 };
 
-pub const DeclaredClassProp = extern struct {
+pub const DeclaredExternTypeProperty = extern struct {
     name: Name,
     nameLocation: Location,
     ty: ?*Node = null,
@@ -1505,7 +1515,7 @@ pub const TableIndexer = extern struct {
     accessLocation: Optional(Location),
 };
 
-pub const StatDeclareClass = extern struct {
+pub const StatDeclareExternType = extern struct {
     vtable: *const anyopaque,
 
     classIndex: Node.Kind,
@@ -1514,7 +1524,7 @@ pub const StatDeclareClass = extern struct {
 
     name: Name,
     superName: Optional(Name),
-    props: Array(DeclaredClassProp),
+    props: Array(DeclaredExternTypeProperty),
     indexer: ?*TableIndexer,
 };
 
@@ -1567,7 +1577,9 @@ pub const TypeFunction = extern struct {
     genericPacks: Array(*GenericTypePack),
     argTypes: TypeList,
     argNames: Array(Optional(ArgumentName)),
-    returnTypes: TypeList,
+    returnTypes_DEPRECATED: TypeList,
+    /// *AstTypePack
+    returnTypes: *Node,
 };
 
 pub const TypeTypeof = extern struct {

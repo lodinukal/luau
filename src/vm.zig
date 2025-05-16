@@ -326,6 +326,10 @@ pub const State = opaque {
         return raw.lua_typename(tlua(l), @intFromEnum(tp));
     }
 
+    pub inline fn callyieldable(l: *State, nargs: i32, nresults: i32) i32 {
+        return raw.luaL_callyieldable(tlua(l), nargs, nresults);
+    }
+
     pub inline fn equal(l: *State, a: Index, b: Index) bool {
         return raw.lua_equal(tlua(l), @intFromEnum(a), @intFromEnum(b)) != 0;
     }
