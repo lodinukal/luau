@@ -95,6 +95,89 @@ pub const Alloc = *const fn (
     new_size: usize,
 ) callconv(.c) ?*align(alignment_raw) anyopaque;
 
+pub const Destructor = *const fn (l: *State, userdata: *anyopaque) callconv(.c) void;
+
+pub const Ref = enum(i32) {
+    no = -1,
+    nil = 0,
+    _,
+
+    pub inline fn int(self: Ref) i32 {
+        return @intFromEnum(self);
+    }
+};
+
+pub const Debug = extern struct {
+    name: [*:0]const u8, // (n)
+    namewhat: [*:0]const u8, // (s)
+    source: [*:0]const u8, // (s)
+    short_src: [*:0]const u8, // (s)
+    linedefined: i32, // (s)
+    currentline: i32, // (l)
+    nupvals: u8, // (u) number of upvalues
+    nparams: u8, // (a) number of parameters
+    isvararg: bool, // (a)
+    userdata: ?*anyopaque, // only valid in luau_callhook
+
+    string_buffer: [config.id_size]u8,
+
+    pub const Request = struct {
+        /// enables 'n'
+        name: bool,
+        /// enables 's'
+        source: bool,
+        /// enables 'l'
+        line: bool,
+        /// enables 'u'
+        upval: bool,
+        /// enables 'a'
+        arg: bool,
+        /// enables 'f', only valid in luau_callhook
+        func: bool,
+    };
+};
+
+pub const Hook = *const fn (l: *State, ar: *Debug) callconv(.c) void;
+
+pub const Coverage = *const fn (
+    context: *anyopaque,
+    function: [*:0]const u8,
+    linedefined: i32,
+    depth: i32,
+    hits: *const i32,
+    size: usize,
+) callconv(.c) void;
+/// Callbacks that can be used to reconfigure behavior of the VM dynamically.
+/// These are shared between all coroutines.
+///
+/// Note: interrupt is safe to set from an arbitrary thread but all other callbacks
+/// can only be changed when the VM is not running any code
+pub const Callbacks = extern struct {
+    userdata: *anyopaque,
+
+    /// gets called at safepoints (loop back edges, call/ret, gc) if set
+    interrupt: ?*const fn (l: *State, op: RawGcOp) callconv(.c) void,
+    /// gets called when an unprotected error is raised (if longjmp is used)
+    panic: ?*const fn (l: *State, errcode: i32) callconv(.c) void,
+
+    /// gets called when L is created (LP == parent) or destroyed (LP == NULL)
+    userthread: ?*const fn (parent: *State, l: *State) callconv(.c) void,
+    /// gets called when a string is created; returned atom can be retrieved via tostringatom
+    useratom: ?*const fn (s: [*]const u8, l: usize) callconv(.c) i16,
+
+    /// gets called when BREAK instruction is encountered
+    debugbreak: ?*const fn (l: *State, ar: *Debug) callconv(.c) void,
+    /// gets called after each instruction in single step mode
+    debugstep: ?*const fn (l: *State, ar: *Debug) callconv(.c) void,
+    /// gets called when thread execution is interrupted by break in another thread
+    debuginterrupt: ?*const fn (l: *State, ar: *Debug) callconv(.c) void,
+    /// gets called when protected call results in an error
+    debugprotectederror: ?*const fn (l: *State) callconv(.c) void,
+
+    // gets called when memory is allocated
+    onallocate: ?*const fn (l: *State, osize: usize, nsize: usize) callconv(.c) void,
+};
+
 const alignment_raw = @alignOf(std.c.max_align_t);
 const alignment: std.mem.Alignment = .of(std.c.max_align_t);
 /// Allows Luau to allocate memory using a Zig allocator passed in via data.
@@ -721,13 +804,209 @@ pub const State = opaque {
         raw.lua_error(tlua(l));
     }
 
-    pub inline fn errStr(l: *State, comptime fmt: [:0]const u8, args: anytype) noreturn {
+    pub inline fn errFmt(l: *State, comptime fmt: []const u8, args: anytype) noreturn {
         l.pushFmtString(fmt, args) catch l.pushString(fmt);
         l.err();
     }
 
+    pub inline fn argErr(l: *State, arg: i32, msg: [:0]const u8) noreturn {
+        raw.luaL_argerrorL(tlua(l), arg, msg);
+    }
+
+    pub inline fn argErrFmt(l: *State, arg: i32, comptime fmt: []const u8, args: anytype) noreturn {
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrintZ(&msg_buf, fmt, args) catch @panic("failed to format error message: out of memory");
+        l.argErr(arg, msg);
+    }
+
+    pub inline fn typeErr(l: *State, arg: i32, expected: [:0]const u8) noreturn {
+        raw.luaL_typeerror(tlua(l), arg, expected);
+    }
+
+    /// returns `more` number
+    pub inline fn next(l: *State, idx: Index) i32 {
+        return raw.lua_next(tlua(l), @intFromEnum(idx));
+    }
+
+    /// returns the next position, -1 if the iterator is finished
+    pub inline fn rawIter(l: *State, idx: Index, start_pos: i32) i32 {
+        return raw.lua_rawiter(tlua(l), @intFromEnum(idx), start_pos);
+    }
+
+    /// concats the top n elements in the stack, and pushes the result on the top;
+    /// if n is 0 then its an empty string
+    pub inline fn concat(l: *State, n: i32) void {
+        raw.lua_concat(tlua(l), n);
+    }
+
+    /// encodes a pointer for this lua state
+    pub inline fn encodePointer(l: *State, ptr: *anyopaque) *anyopaque {
+        return raw.lua_encodepointer(tlua(l), @intFromPtr(ptr));
+    }
+
+    /// gets the internal luau clock
+    pub inline fn clock(l: *State) f64 {
+        return raw.lua_clock(tlua(l));
+    }
+
+    /// sets a userdata tag for the stack element at the given index
+    pub inline fn setUserdataTag(l: *State, idx: Index, tag: i32) void {
+        raw.lua_setuserdatatag(tlua(l), @intFromEnum(idx), tag);
+    }
+
+    /// sets the destructor for the userdata
+    pub inline fn setTagDestructor(l: *State, tag: i32, dtor: ?Destructor) void {
+        raw.lua_setuserdatadtor(tlua(l), tag, @ptrCast(dtor));
+    }
+
+    /// gets the destructor for the userdata
+    pub inline fn getTagDestructor(l: *State, tag: i32) ?Destructor {
+        return raw.lua_getuserdatadtor(tlua(l), tag);
+    }
+
+    // alternative access for metatables already registered with luaL_newmetatable
+    // used by lua_newuserdatataggedwithmetatable to create tagged userdata with the associated metatable assigned
+    /// sets the metatable for the given tag, WILL ERROR IF THE TOP STACK ELEMENT IS NOT A TABLE
+    pub inline fn setTagMetatable(l: *State, tag: i32) void {
+        return raw.lua_setuserdatametatable(tlua(l), tag);
+    }
+
+    /// gets the metatable for the given tag and pushes it on the stack, nil if not found
+    pub inline fn getTagMetatable(l: *State, tag: i32) void {
+        raw.lua_getuserdatametatable(tlua(l), tag);
+    }
+
+    /// sets the name of a lightuserdata tag
+    pub inline fn setLightUserdataTagName(l: *State, tag: i32, name: [:0]const u8) void {
+        raw.lua_setlightuserdataname(tlua(l), tag, name);
+    }
+
+    /// gets the name of a lightuserdata tag
+    pub inline fn getLightUserdataTagName(l: *State, tag: i32) ?[:0]const u8 {
+        return std.mem.span(raw.lua_getlightuserdataname(tlua(l), tag) orelse return null);
+    }
+
+    /// clones a function at the given index and pushes it on the stack
+    pub inline fn cloneFunction(l: *State, idx: Index) void {
+        raw.lua_clonefunction(tlua(l), @intFromEnum(idx));
+    }
+
+    /// clears the table at the given index
+    pub inline fn clearTable(l: *State, idx: Index) void {
+        raw.lua_cleartable(tlua(l), @intFromEnum(idx));
+    }
+
+    /// clones the table at the given index and pushes it on the stack
+    pub inline fn cloneTable(l: *State, idx: Index) void {
+        raw.lua_clonetable(tlua(l), @intFromEnum(idx));
+    }
+
+    /// creates a ref to the object at the given index, asserts idx != .registry
+    pub inline fn ref(l: *State, idx: Index) Ref {
+        return raw.lua_ref(tlua(l), @intFromEnum(idx));
+    }
+
+    /// unrefs the object at the given index, if invalid does nothing
+    pub inline fn unref(l: *State, idx: Index, r: Ref) void {
+        raw.lua_unref(tlua(l), @intFromEnum(idx), r);
+    }
+
+    /// gets the object for this ref, pushes it on the stack
+    pub inline fn getRef(l: *State, r: Ref) Type {
+        return l.rawGeti(.registry, r.int());
+    }
+
+    /// gets the current stack depth
+    pub inline fn stackDepth(l: *State) i32 {
+        return raw.lua_stackdepth(tlua(l));
+    }
+
+    /// gets info about the state
+    pub inline fn getDebug(l: *State, level: i32, request: Debug.Request) ?Debug {
+        var what: [8]u8 = @splat(0);
+        var i: usize = 0;
+        inline for (.{
+            .{ request.name, 'n' },
+            .{ request.source, 's' },
+            .{ request.line, 'l' },
+            .{ request.upval, 'u' },
+            .{ request.arg, 'a' },
+            .{ request.func, 'f' },
+        }) |field| {
+            if (field.value) what[i] = field.tag;
+            i += 1;
+        }
+
+        var out_info: Debug = undefined;
+        const success: bool = (raw.lua_getinfo(tlua(l), level, &what, &out_info)) == 1;
+        if (!success) return null;
+        return out_info;
+    }
+
+    /// gets the function name for the given level and pushes it on the stack
+    pub inline fn getArgument(l: *State, level: i32, n: i32) bool {
+        return raw.lua_getargument(tlua(l), level, n) != 0;
+    }
+
+    /// gets the local for the given level and pushes it on the stack, also returns the
+    /// function name as a string if available
+    pub inline fn getLocal(l: *State, level: i32, n: i32) ?[:0]const u8 {
+        const opt_cstring_name = raw.lua_getlocal(tlua(l), level, n);
+        if (opt_cstring_name == null) return null;
+        const cstring_name = opt_cstring_name orelse return null;
+        return std.mem.span(cstring_name);
+    }
+
+    /// sets the local for the given level and n using the top of the stack, and if the name is
+    /// available, returns the name as a string
+    pub inline fn setLocal(l: *State, level: i32, n: i32) ?[:0]const u8 {
+        const opt_cstring_name = raw.lua_setlocal(tlua(l), level, n);
+        if (opt_cstring_name == null) return null;
+        const cstring_name = opt_cstring_name orelse return null;
+        return std.mem.span(cstring_name);
+    }
+
+    /// gets the upvalue name for the given level and n using the top of the stack, and if the name is
+    /// available, returns the name as a string
+    pub inline fn getUpvalue(l: *State, level: i32, n: i32) ?[:0]const u8 {
+        const opt_cstring_name = raw.lua_getupvalue(tlua(l), level, n);
+        if (opt_cstring_name == null) return null;
+        const cstring_name = opt_cstring_name orelse return null;
+        return std.mem.span(cstring_name);
+    }
+
+    /// sets the upvalue name for the given level and n using the top of the stack, and if the name is
+    /// available, returns the name as a string
+    pub inline fn setUpvalue(l: *State, level: i32, n: i32) ?[:0]const u8 {
+        const opt_cstring_name = raw.lua_setupvalue(tlua(l), level, n);
+        if (opt_cstring_name == null) return null;
+        const cstring_name = opt_cstring_name orelse return null;
+        return std.mem.span(cstring_name);
+    }
+
+    /// enables a single step in the state (for debugging)
+    pub inline fn setSingleStep(l: *State, enabled: bool) void {
+        raw.lua_singlestep(tlua(l), if (enabled) 1 else 0);
+    }
+
+    /// adds a breakpoint, returning the line number of the breakpoint
+    pub inline fn breakpoint(l: *State, func_index: Index, line: i32, enabled: bool) ?i32 {
+        const result = raw.lua_breakpoint(tlua(l), func_index.int(), line, if (enabled) 1 else 0);
+        if (result == -1) return null;
+        return result;
+    }
+
+    /// runs coverage on a function
+    pub inline fn coverage(l: *State, func_index: Index, context: *anyopaque, callback: Coverage) void {
+        raw.lua_getcoverage(tlua(l), func_index.int(), context, @ptrCast(callback));
+    }
+
     pub inline fn debugTrace(l: *State) [:0]const u8 {
         return std.mem.span(raw.lua_debugtrace(tlua(l)));
+    }
+
+    pub inline fn callbacks(l: *State) *Callbacks {
+        return @ptrCast(raw.lua_callbacks(tlua(l)));
     }
 
     // utils (aux)
@@ -1001,7 +1280,7 @@ pub fn zigToCFn(comptime fn_ty: std.builtin.Type.Fn, comptime f: anytype) CFunct
                         return if (@TypeOf(res) == void) 0 else @intCast(res)
                     else |err| switch (@as(new_error_set, @errorCast(err))) {
                         error.RaiseLuauError => s.err(),
-                        else => s.errStr("{s}", .{@errorName(err)}),
+                        else => s.errFmt("{s}", .{@errorName(err)}),
                     }
                 }
             }.inner;

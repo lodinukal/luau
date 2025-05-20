@@ -61,8 +61,24 @@ pub const Configuration = extern struct {
     /// If not, require-by-string will call to_parent until either a
     /// configuration file is present or NAVIGATE_FAILURE is returned (at root).
     is_config_present: *const fn (l: *luau.State, context: *anyopaque) callconv(.c) bool,
+    // Parses the configuration file in the current context for the given alias
+    // and returns its value or WRITE_FAILURE if not found. This function is
+    // only called if is_config_present returns true. If this function pointer
+    // is set, get_config must not be set. Opting in to this function pointer
+    // disables parsing configuration files internally and can be used for finer
+    // control over the configuration file parsing process.
+    get_alias: *const fn (
+        l: *luau.State,
+        context: *anyopaque,
+        alias: [*:0]const u8,
+        buffer: [*:0]u8,
+        buffer_size: usize,
+        size_out: *usize,
+    ) callconv(.c) WriteResult,
     /// Provides the contents of the configuration file in the current context.
-    /// This function is only called if is_config_present returns true.
+    /// This function is only called if is_config_present returns true. If this
+    // function pointer is set, get_alias must not be set. Opting in to this
+    // function pointer enables parsing configuration files internally.
     get_config: *const fn (
         l: *luau.State,
         context: *anyopaque,
