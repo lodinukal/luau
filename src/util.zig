@@ -146,7 +146,8 @@ test marshal {
 
     state.open(.{});
 
-    state.pushFunction(Employee.lGetEmployee, "getEmployee");
+    // state.pushFunction(Employee.lGetEmployee, "getEmployee");
+    state.pushClosurek(.init(Employee.lGetEmployee, "getEmployee"), 0);
     state.setGlobal("getEmployee");
 
     if (!state.load("@module", bc.bytes)) {

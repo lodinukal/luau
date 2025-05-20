@@ -88,6 +88,27 @@ pub const CoroutineStatus = enum(u32) {
 pub const CFunction = *const fn (l: *State) callconv(.c) i32;
 pub const Continuation = *const fn (l: *State, status: Status) callconv(.c) i32;
 
+pub const ClosureK = struct {
+    func: CFunction,
+    cont: ?Continuation = null,
+    debug_name: [:0]const u8 = "",
+
+    pub fn init(
+        comptime f: anytype,
+        debug_name: [:0]const u8,
+    ) ClosureK {
+        return .{ .func = toCFn(f), .debug_name = debug_name };
+    }
+
+    pub fn withContinuation(
+        comptime f: anytype,
+        cont: Continuation,
+        debug_name: [:0]const u8,
+    ) ClosureK {
+        return .{ .func = toCFn(f), .cont = cont, .debug_name = debug_name };
+    }
+};
+
 pub const Alloc = *const fn (
     userdata: ?*anyopaque,
     pointer: ?*anyopaque,
@@ -586,24 +607,10 @@ pub const State = opaque {
 
     pub inline fn pushClosurek(
         l: *State,
-        f: CFunction,
-        debug_name: [*:0]const u8,
+        closure: ClosureK,
         upvalues: i32,
-        cont: ?Continuation,
     ) void {
-        raw.lua_pushcclosurek(tlua(l), @ptrCast(f), debug_name, upvalues, @ptrCast(cont));
-    }
-
-    pub inline fn pushClosure(l: *State, f: CFunction, debug_name: [*:0]const u8, upvalues: i32) void {
-        l.pushClosurek(f, debug_name, upvalues, null);
-    }
-
-    pub inline fn pushCFunction(l: *State, f: CFunction, debug_name: [*:0]const u8) void {
-        l.pushClosure(f, debug_name, 0);
-    }
-
-    pub inline fn pushFunction(l: *State, comptime f: anytype, debug_name: [*:0]const u8) void {
-        l.pushCFunction(toCFn(f), debug_name);
+        raw.lua_pushcclosurek(tlua(l), @ptrCast(closure.func), closure.debug_name.ptr, upvalues, @ptrCast(closure.cont));
     }
 
     pub inline fn pushBoolean(l: *State, b: bool) void {
@@ -1068,7 +1075,7 @@ pub const State = opaque {
     }
 
     pub inline fn require(l: *State, name: [:0]const u8, func: CFunction) void {
-        l.pushCFunction(func, name);
+        l.pushClosurek(.{ .func = func, .debug_name = name }, 0);
         l.pushString(name);
         l.call(1, 0);
     }
@@ -1089,6 +1096,8 @@ pub const State = opaque {
             const slice = val.constSlice();
             const new_buffer = l.newBuffer(slice.len);
             @memcpy(new_buffer.mutable, slice);
+        } else if (T == ClosureK) {
+            l.pushClosurek(val, 0);
         } else switch (ti) {
             .bool => l.pushBoolean(val),
             .int => |int| {
@@ -1139,7 +1148,8 @@ pub const State = opaque {
                 l.createPushTable(val, stack_offset);
             },
             .@"fn" => |_| {
-                l.pushFunction(val, @typeName(T));
+                // l.pushFunction(val, @typeName(T));
+                l.pushClosurek(.init(val, @typeName(T)), 0);
             },
             .void => {
                 l.pushNil();
