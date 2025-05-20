@@ -67,7 +67,7 @@ pub const Configuration = extern struct {
     // is set, get_config must not be set. Opting in to this function pointer
     // disables parsing configuration files internally and can be used for finer
     // control over the configuration file parsing process.
-    get_alias: *const fn (
+    get_alias: ?*const fn (
         l: *luau.State,
         context: *anyopaque,
         alias: [*:0]const u8,
@@ -79,7 +79,7 @@ pub const Configuration = extern struct {
     /// This function is only called if is_config_present returns true. If this
     // function pointer is set, get_alias must not be set. Opting in to this
     // function pointer enables parsing configuration files internally.
-    get_config: *const fn (
+    get_config: ?*const fn (
         l: *luau.State,
         context: *anyopaque,
         buffer: [*:0]u8,
