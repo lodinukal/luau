@@ -188,8 +188,8 @@ pub fn build(b: *std.Build) !void {
         lib.installHeader(b.path("Compiler/include/luacode.h"), "luacode.h");
     }
 
-    // const step = compile_commands.createStep(b, "cdb", &.{lib});
-    // b.getInstallStep().dependOn(step);
+    const step = compile_commands.createStep(b, "cdb", &.{lib});
+    b.getInstallStep().dependOn(step);
 
     const mod = b.addModule("luau", .{
         .target = target,

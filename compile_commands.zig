@@ -75,6 +75,7 @@ fn extractIncludeDirsFromCompileStepInner(b: *std.Build, step: *std.Build.Step.C
                 std.log.warn("Found path_after- compile commands generation for this is untested.", .{});
                 lazy_path_output.append(path) catch @panic("OOM");
             },
+            .embed_path => {},
         }
     }
 }
