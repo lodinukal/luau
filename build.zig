@@ -85,7 +85,8 @@ pub fn build(b: *std.Build) !void {
         });
     }
     try flags.appendSlice(&.{
-        "-DLUA_USE_LONGJMP=" ++ if (!is_wasm) "1" else "0",
+        // "-DLUA_USE_LONGJMP=" ++ if (!is_wasm) "1" else "0",
+        "-DLUA_USE_LONGJMP=" ++ "0",
         "-std=" ++ cpp_version,
     });
 

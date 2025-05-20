@@ -752,7 +752,7 @@ pub const State = opaque {
 
     // coroutine functions
 
-    pub inline fn yield(l: *State, nresults: i32) Index {
+    pub inline fn yield(l: *State, nresults: i32) i32 {
         return @enumFromInt(raw.lua_yield(tlua(l), nresults));
     }
 
@@ -812,7 +812,7 @@ pub const State = opaque {
     }
 
     pub inline fn errFmt(l: *State, comptime fmt: []const u8, args: anytype) noreturn {
-        l.pushFmtString(fmt, args) catch l.pushString(fmt);
+        l.pushFmtString(fmt, args) catch l.pushLengthString(fmt);
         l.err();
     }
 
@@ -1284,8 +1284,6 @@ pub fn zigToCFn(comptime fn_ty: std.builtin.Type.Fn, comptime f: anytype) CFunct
             const new_error_set = @Type(.{
                 .error_set = error_set ++ &[_]std.builtin.Type.Error{
                     .{ .name = "RaiseLuauError" },
-                    .{ .name = "YieldLuau0" },
-                    .{ .name = "YieldLuau1" },
                 },
             });
             return struct {
@@ -1294,8 +1292,6 @@ pub fn zigToCFn(comptime fn_ty: std.builtin.Type.Fn, comptime f: anytype) CFunct
                         return if (@TypeOf(res) == void) 0 else @intCast(res)
                     else |err| switch (@as(new_error_set, @errorCast(err))) {
                         error.RaiseLuauError => s.err(),
-                        error.YieldLuau0 => s.yield(0),
-                        error.YieldLuau1 => s.yield(1),
                         else => s.errFmt("{s}", .{@errorName(err)}),
                     }
                 }
