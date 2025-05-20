@@ -1,10 +1,6 @@
 
 #include "lualib.h"
-
-#include "lstate.h"
-#include "lapi.h"
-#include "ldo.h"
-#include "ludata.h"
+#include "Luau/Common.h"
 
 #include <ctype.h>
 #include <stdio.h>
