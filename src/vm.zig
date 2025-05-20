@@ -1272,7 +1272,11 @@ pub fn zigToCFn(comptime fn_ty: std.builtin.Type.Fn, comptime f: anytype) CFunct
         .error_union => |err_union| {
             const error_set = @typeInfo(err_union.error_set).error_set.?;
             const new_error_set = @Type(.{
-                .error_set = error_set ++ &[_]std.builtin.Type.Error{.{ .name = "RaiseLuauError" }},
+                .error_set = error_set ++ &[_]std.builtin.Type.Error{
+                    .{ .name = "RaiseLuauError" },
+                    .{ .name = "YieldLuau0" },
+                    .{ .name = "YieldLuau1" },
+                },
             });
             return struct {
                 fn inner(s: *State) callconv(.C) c_int {
@@ -1280,6 +1284,8 @@ pub fn zigToCFn(comptime fn_ty: std.builtin.Type.Fn, comptime f: anytype) CFunct
                         return if (@TypeOf(res) == void) 0 else @intCast(res)
                     else |err| switch (@as(new_error_set, @errorCast(err))) {
                         error.RaiseLuauError => s.err(),
+                        error.YieldLuau0 => s.yield(0),
+                        error.YieldLuau1 => s.yield(1),
                         else => s.errFmt("{s}", .{@errorName(err)}),
                     }
                 }
