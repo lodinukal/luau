@@ -1202,6 +1202,11 @@ pub const State = opaque {
     }
 };
 
+extern "c" fn Luau_VM_enable_yieldable_continuations(bool) void;
+pub fn enableYieldableContinuations(enable: bool) void {
+    Luau_VM_enable_yieldable_continuations(enable);
+}
+
 pub const OpenLibraries = struct {
     base: bool = true,
     coroutine: bool = true,

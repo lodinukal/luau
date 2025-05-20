@@ -205,6 +205,7 @@ pub fn build(b: *std.Build) !void {
             "Ast.cpp",
             "Compiler.cpp",
             "Assert.cpp",
+            "VM.cpp",
         },
         .flags = flags.items,
         .language = .cpp,
