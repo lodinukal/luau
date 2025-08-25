@@ -14,7 +14,7 @@
 #include <string.h>
 #include <stdio.h>
 
-LUAU_FASTFLAG(LuauCurrentLineBounds)
+LUAU_FASTFLAGVARIABLE(LuauHeapDumpStringSizeOverhead)
 
 static void validateobjref(global_State* g, GCObject* f, GCObject* t)
 {
@@ -464,7 +464,7 @@ static void dumpthread(FILE* f, lua_State* th)
             else if (isLua(ci))
             {
                 Proto* p = ci_func(ci)->l.p;
-                int pc = FFlag::LuauCurrentLineBounds ? pcRel(ci->savedpc, p) : pcRel_DEPRECATED(ci->savedpc, p);
+                int pc = pcRel(ci->savedpc, p);
                 const LocVar* var = luaF_findlocal(p, int(v - ci->base), pc);
 
                 if (var && var->varname)
@@ -653,7 +653,10 @@ static void enumedges(EnumContext* ctx, GCObject* from, TValue* data, size_t siz
 
 static void enumstring(EnumContext* ctx, TString* ts)
 {
-    enumnode(ctx, obj2gco(ts), ts->len, NULL);
+    if (FFlag::LuauHeapDumpStringSizeOverhead)
+        enumnode(ctx, obj2gco(ts), sizestring(ts->len), NULL);
+    else
+        enumnode(ctx, obj2gco(ts), ts->len, NULL);
 }
 
 static void enumtable(EnumContext* ctx, LuaTable* h)
@@ -729,9 +732,9 @@ static void enumclosure(EnumContext* ctx, Closure* cl)
         char buf[LUA_IDSIZE];
 
         if (p->source)
-            snprintf(buf, sizeof(buf), "%s:%d %s", p->debugname ? getstr(p->debugname) : "", p->linedefined, getstr(p->source));
+            snprintf(buf, sizeof(buf), "%s:%d %s", p->debugname ? getstr(p->debugname) : "unnamed", p->linedefined, getstr(p->source));
         else
-            snprintf(buf, sizeof(buf), "%s:%d", p->debugname ? getstr(p->debugname) : "", p->linedefined);
+            snprintf(buf, sizeof(buf), "%s:%d", p->debugname ? getstr(p->debugname) : "unnamed", p->linedefined);
 
         enumnode(ctx, obj2gco(cl), sizeLclosure(cl->nupvalues), buf);
     }
@@ -800,9 +803,9 @@ static void enumthread(EnumContext* ctx, lua_State* th)
         char buf[LUA_IDSIZE];
 
         if (p->source)
-            snprintf(buf, sizeof(buf), "%s:%d %s", p->debugname ? getstr(p->debugname) : "", p->linedefined, getstr(p->source));
+            snprintf(buf, sizeof(buf), "thread at %s:%d %s", p->debugname ? getstr(p->debugname) : "unnamed", p->linedefined, getstr(p->source));
         else
-            snprintf(buf, sizeof(buf), "%s:%d", p->debugname ? getstr(p->debugname) : "", p->linedefined);
+            snprintf(buf, sizeof(buf), "thread at %s:%d", p->debugname ? getstr(p->debugname) : "unnamed", p->linedefined);
 
         enumnode(ctx, obj2gco(th), size, buf);
     }
@@ -835,7 +838,14 @@ static void enumproto(EnumContext* ctx, Proto* p)
         ctx->edge(ctx->context, enumtopointer(obj2gco(p)), p->execdata, "[native]");
     }
 
-    enumnode(ctx, obj2gco(p), size, p->source ? getstr(p->source) : NULL);
+    char buf[LUA_IDSIZE];
+
+    if (p->source)
+        snprintf(buf, sizeof(buf), "proto %s:%d %s", p->debugname ? getstr(p->debugname) : "unnamed", p->linedefined, getstr(p->source));
+    else
+        snprintf(buf, sizeof(buf), "proto %s:%d", p->debugname ? getstr(p->debugname) : "unnamed", p->linedefined);
+
+    enumnode(ctx, obj2gco(p), size, buf);
 
     if (p->sizek)
         enumedges(ctx, obj2gco(p), p->k, p->sizek, "constants");

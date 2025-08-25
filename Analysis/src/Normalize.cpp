@@ -13,6 +13,7 @@
 #include "Luau/Subtyping.h"
 #include "Luau/Type.h"
 #include "Luau/TypeFwd.h"
+#include "Luau/TypeUtils.h"
 #include "Luau/Unifier.h"
 
 LUAU_FASTFLAGVARIABLE(DebugLuauCheckNormalizeInvariant)
@@ -21,6 +22,10 @@ LUAU_FASTINTVARIABLE(LuauNormalizeCacheLimit, 100000)
 LUAU_FASTINTVARIABLE(LuauNormalizeIntersectionLimit, 200)
 LUAU_FASTINTVARIABLE(LuauNormalizeUnionLimit, 100)
 LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTFLAGVARIABLE(LuauNormalizationReorderFreeTypeIntersect)
+LUAU_FASTFLAG(LuauUseWorkspacePropToChooseSolver)
+LUAU_FASTFLAGVARIABLE(LuauNormalizationLimitTyvarUnionSize)
+LUAU_FASTFLAG(LuauReduceSetTypeStackPressure)
 
 namespace Luau
 {
@@ -31,150 +36,6 @@ static bool shouldEarlyExit(NormalizationResult res)
     if (res == NormalizationResult::HitLimits || res == NormalizationResult::False)
         return true;
     return false;
-}
-
-TypeIds::TypeIds(std::initializer_list<TypeId> tys)
-{
-    for (TypeId ty : tys)
-        insert(ty);
-}
-
-void TypeIds::insert(TypeId ty)
-{
-    ty = follow(ty);
-
-    // get a reference to the slot for `ty` in `types`
-    bool& entry = types[ty];
-
-    // if `ty` is fresh, we can set it to `true`, add it to the order and hash and be done.
-    if (!entry)
-    {
-        entry = true;
-        order.push_back(ty);
-        hash ^= std::hash<TypeId>{}(ty);
-    }
-}
-
-void TypeIds::clear()
-{
-    order.clear();
-    types.clear();
-    hash = 0;
-}
-
-TypeId TypeIds::front() const
-{
-    return order.at(0);
-}
-
-TypeIds::iterator TypeIds::begin()
-{
-    return order.begin();
-}
-
-TypeIds::iterator TypeIds::end()
-{
-    return order.end();
-}
-
-TypeIds::const_iterator TypeIds::begin() const
-{
-    return order.begin();
-}
-
-TypeIds::const_iterator TypeIds::end() const
-{
-    return order.end();
-}
-
-TypeIds::iterator TypeIds::erase(TypeIds::const_iterator it)
-{
-    TypeId ty = *it;
-    types[ty] = false;
-    hash ^= std::hash<TypeId>{}(ty);
-    return order.erase(it);
-}
-
-void TypeIds::erase(TypeId ty)
-{
-    const_iterator it = std::find(order.begin(), order.end(), ty);
-    if (it == order.end())
-        return;
-
-    erase(it);
-}
-
-size_t TypeIds::size() const
-{
-    return order.size();
-}
-
-bool TypeIds::empty() const
-{
-    return order.empty();
-}
-
-size_t TypeIds::count(TypeId ty) const
-{
-    ty = follow(ty);
-    const bool* val = types.find(ty);
-    return (val && *val) ? 1 : 0;
-}
-
-void TypeIds::retain(const TypeIds& there)
-{
-    for (auto it = begin(); it != end();)
-    {
-        if (there.count(*it))
-            it++;
-        else
-            it = erase(it);
-    }
-}
-
-size_t TypeIds::getHash() const
-{
-    return hash;
-}
-
-bool TypeIds::isNever() const
-{
-    return std::all_of(
-        begin(),
-        end(),
-        [&](TypeId i)
-        {
-            // If each typeid is never, then I guess typeid's is also never?
-            return get<NeverType>(i) != nullptr;
-        }
-    );
-}
-
-bool TypeIds::operator==(const TypeIds& there) const
-{
-    // we can early return if the hashes don't match.
-    if (hash != there.hash)
-        return false;
-
-    // we have to check equality of the sets themselves if not.
-
-    // if the sets are unequal sizes, then they cannot possibly be equal.
-    // it is important to use `order` here and not `types` since the mappings
-    // may have different sizes since removal is not possible, and so erase
-    // simply writes `false` into the map.
-    if (order.size() != there.order.size())
-        return false;
-
-    // otherwise, we'll need to check that every element we have here is in `there`.
-    for (auto ty : order)
-    {
-        // if it's not, we'll return `false`
-        if (there.count(ty) == 0)
-            return false;
-    }
-
-    // otherwise, we've proven the two equal!
-    return true;
 }
 
 NormalizedStringType::NormalizedStringType() {}
@@ -533,7 +394,7 @@ NormalizationResult Normalizer::isInhabited(TypeId ty, Set<TypeId>& seen)
     {
         for (const auto& [_, prop] : ttv->props)
         {
-            if (FFlag::LuauSolverV2)
+            if (useNewLuauSolver())
             {
                 // A table enclosing a read property whose type is uninhabitable is also itself uninhabitable,
                 // but not its write property. That just means the write property doesn't exist, and so is readonly.
@@ -546,7 +407,7 @@ NormalizationResult Normalizer::isInhabited(TypeId ty, Set<TypeId>& seen)
             }
             else
             {
-                NormalizationResult res = isInhabited(prop.type(), seen);
+                NormalizationResult res = isInhabited(prop.type_DEPRECATED(), seen);
                 if (res != NormalizationResult::True)
                     return res;
             }
@@ -860,11 +721,18 @@ static void assertInvariant(const NormalizedType& norm)
 #endif
 }
 
-Normalizer::Normalizer(TypeArena* arena, NotNull<BuiltinTypes> builtinTypes, NotNull<UnifierSharedState> sharedState, bool cacheInhabitance)
+Normalizer::Normalizer(
+    TypeArena* arena,
+    NotNull<BuiltinTypes> builtinTypes,
+    NotNull<UnifierSharedState> sharedState,
+    SolverMode solverMode,
+    bool cacheInhabitance
+)
     : arena(arena)
     , builtinTypes(builtinTypes)
     , sharedState(sharedState)
     , cacheInhabitance(cacheInhabitance)
+    , solverMode(solverMode)
 {
 }
 
@@ -1505,7 +1373,7 @@ std::optional<TypePackId> Normalizer::unionOfTypePacks(TypePackId here, TypePack
     else if (thereSubHere)
         return here;
     if (!head.empty())
-        return arena->addTypePack(TypePack{head, tail});
+        return arena->addTypePack(TypePack{std::move(head), tail});
     else if (tail)
         return *tail;
     else
@@ -1663,6 +1531,12 @@ NormalizationResult Normalizer::unionNormals(NormalizedType& here, const Normali
         return NormalizationResult::True;
     }
 
+    if (FFlag::LuauNormalizationLimitTyvarUnionSize)
+    {
+        if (here.tyvars.size() * there.tyvars.size() >= size_t(FInt::LuauNormalizeUnionLimit))
+            return NormalizationResult::HitLimits;
+    }
+
     for (auto it = there.tyvars.begin(); it != there.tyvars.end(); it++)
     {
         TypeId tyvar = it->first;
@@ -1722,6 +1596,11 @@ bool Normalizer::withinResourceLimits()
             return false;
 
     return true;
+}
+
+bool Normalizer::useNewLuauSolver() const
+{
+    return FFlag::LuauUseWorkspacePropToChooseSolver ? (solverMode == SolverMode::New) : FFlag::LuauSolverV2;
 }
 
 NormalizationResult Normalizer::intersectNormalWithNegationTy(TypeId toNegate, NormalizedType& intersect)
@@ -1964,7 +1843,7 @@ std::optional<NormalizedType> Normalizer::negateNormal(const NormalizedType& her
         }
 
         if (!rootNegations.empty())
-            result.externTypes.pushPair(builtinTypes->externType, rootNegations);
+            result.externTypes.pushPair(builtinTypes->externType, std::move(rootNegations));
     }
 
     result.nils = get<NeverType>(here.nils) ? builtinTypes->nilType : builtinTypes->neverType;
@@ -2517,7 +2396,7 @@ std::optional<TypePackId> Normalizer::intersectionOfTypePacks(TypePackId here, T
     else if (thereSubHere)
         return there;
     if (!head.empty())
-        return arena->addTypePack(TypePack{head, tail});
+        return arena->addTypePack(TypePack{std::move(head), tail});
     else if (tail)
         return *tail;
     else
@@ -2598,7 +2477,7 @@ std::optional<TypeId> Normalizer::intersectionOfTables(TypeId here, TypeId there
         {
             const auto& [_name, tprop] = *tfound;
             // TODO: variance issues here, which can't be fixed until we have read/write property types
-            if (FFlag::LuauSolverV2)
+            if (useNewLuauSolver())
             {
                 if (hprop.readTy.has_value())
                 {
@@ -2655,9 +2534,9 @@ std::optional<TypeId> Normalizer::intersectionOfTables(TypeId here, TypeId there
             }
             else
             {
-                prop.setType(intersectionType(hprop.type(), tprop.type()));
-                hereSubThere &= (prop.type() == hprop.type());
-                thereSubHere &= (prop.type() == tprop.type());
+                prop.setType(intersectionType(hprop.type_DEPRECATED(), tprop.type_DEPRECATED()));
+                hereSubThere &= (prop.type_DEPRECATED() == hprop.type_DEPRECATED());
+                thereSubHere &= (prop.type_DEPRECATED() == tprop.type_DEPRECATED());
             }
         }
 
@@ -3041,6 +2920,24 @@ NormalizationResult Normalizer::intersectNormals(NormalizedType& here, const Nor
     if (here.functions.parts.size() * there.functions.parts.size() >= size_t(FInt::LuauNormalizeIntersectionLimit))
         return NormalizationResult::HitLimits;
 
+    if (FFlag::LuauNormalizationReorderFreeTypeIntersect)
+    {
+        for (auto& [tyvar, inter] : there.tyvars)
+        {
+            int index = tyvarIndex(tyvar);
+            if (ignoreSmallerTyvars < index)
+            {
+                auto [found, fresh] = here.tyvars.emplace(tyvar, std::make_unique<NormalizedType>(NormalizedType{builtinTypes}));
+                if (fresh)
+                {
+                    NormalizationResult res = unionNormals(*found->second, here, index);
+                    if (res != NormalizationResult::True)
+                        return res;
+                }
+            }
+        }
+    }
+
     here.booleans = intersectionOfBools(here.booleans, there.booleans);
 
     intersectExternTypes(here.externTypes, there.externTypes);
@@ -3053,20 +2950,24 @@ NormalizationResult Normalizer::intersectNormals(NormalizedType& here, const Nor
     intersectFunctions(here.functions, there.functions);
     intersectTables(here.tables, there.tables);
 
-    for (auto& [tyvar, inter] : there.tyvars)
+    if (!FFlag::LuauNormalizationReorderFreeTypeIntersect)
     {
-        int index = tyvarIndex(tyvar);
-        if (ignoreSmallerTyvars < index)
+        for (auto& [tyvar, inter] : there.tyvars)
         {
-            auto [found, fresh] = here.tyvars.emplace(tyvar, std::make_unique<NormalizedType>(NormalizedType{builtinTypes}));
-            if (fresh)
+            int index = tyvarIndex(tyvar);
+            if (ignoreSmallerTyvars < index)
             {
-                NormalizationResult res = unionNormals(*found->second, here, index);
-                if (res != NormalizationResult::True)
-                    return res;
+                auto [found, fresh] = here.tyvars.emplace(tyvar, std::make_unique<NormalizedType>(NormalizedType{builtinTypes}));
+                if (fresh)
+                {
+                    NormalizationResult res = unionNormals(*found->second, here, index);
+                    if (res != NormalizationResult::True)
+                        return res;
+                }
             }
         }
     }
+
     for (auto it = here.tyvars.begin(); it != here.tyvars.end();)
     {
         TypeId tyvar = it->first;
@@ -3160,10 +3061,22 @@ NormalizationResult Normalizer::intersectNormalWithTy(
     }
     else if (get<TableType>(there) || get<MetatableType>(there))
     {
-        TypeIds tables = std::move(here.tables);
-        clearNormal(here);
-        intersectTablesWithTable(tables, there, seenTablePropPairs, seenSetTypes);
-        here.tables = std::move(tables);
+        if (useNewLuauSolver())
+        {
+            NormalizedExternType externTypes = std::move(here.externTypes);
+            TypeIds tables = std::move(here.tables);
+            clearNormal(here);
+            intersectTablesWithTable(tables, there, seenTablePropPairs, seenSetTypes);
+            here.tables = std::move(tables);
+            here.externTypes = std::move(externTypes);
+        }
+        else
+        {
+            TypeIds tables = std::move(here.tables);
+            clearNormal(here);
+            intersectTablesWithTable(tables, there, seenTablePropPairs, seenSetTypes);
+            here.tables = std::move(tables);
+        }
     }
     else if (get<ExternType>(there))
     {
@@ -3430,14 +3343,11 @@ TypeId Normalizer::typeFromNormal(const NormalizedType& norm)
     if (!get<NeverType>(norm.buffers))
         result.push_back(builtinTypes->bufferType);
 
-    if (FFlag::LuauSolverV2)
+    if (useNewLuauSolver())
     {
         result.reserve(result.size() + norm.tables.size());
         for (auto table : norm.tables)
-        {
-            makeTableShared(table);
             result.push_back(table);
-        }
     }
     else
         result.insert(result.end(), norm.tables.begin(), norm.tables.end());
@@ -3447,7 +3357,10 @@ TypeId Normalizer::typeFromNormal(const NormalizedType& norm)
         if (get<NeverType>(intersect->tops))
         {
             TypeId ty = typeFromNormal(*intersect);
-            result.push_back(arena->addType(IntersectionType{{tyvar, ty}}));
+            if (FFlag::LuauReduceSetTypeStackPressure)
+                result.push_back(addIntersection(NotNull{arena}, builtinTypes, {tyvar, ty}));
+            else
+                result.push_back(arena->addType(IntersectionType{{tyvar, ty}}));
         }
         else
             result.push_back(tyvar);
@@ -3467,30 +3380,50 @@ bool isSubtype(
     NotNull<Scope> scope,
     NotNull<BuiltinTypes> builtinTypes,
     NotNull<Simplifier> simplifier,
-    InternalErrorReporter& ice
+    InternalErrorReporter& ice,
+    SolverMode solverMode
 )
 {
     UnifierSharedState sharedState{&ice};
     TypeArena arena;
-    Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}};
     TypeCheckLimits limits;
     TypeFunctionRuntime typeFunctionRuntime{
         NotNull{&ice}, NotNull{&limits}
     }; // TODO: maybe subtyping checks should not invoke user-defined type function runtime
 
-    // Subtyping under DCR is not implemented using unification!
-    if (FFlag::LuauSolverV2)
+    if (FFlag::LuauUseWorkspacePropToChooseSolver)
     {
-        Subtyping subtyping{builtinTypes, NotNull{&arena}, simplifier, NotNull{&normalizer}, NotNull{&typeFunctionRuntime}, NotNull{&ice}};
+        Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}, solverMode};
+        if (solverMode == SolverMode::New)
+        {
+            Subtyping subtyping{builtinTypes, NotNull{&arena}, simplifier, NotNull{&normalizer}, NotNull{&typeFunctionRuntime}, NotNull{&ice}};
 
-        return subtyping.isSubtype(subTy, superTy, scope).isSubtype;
+            return subtyping.isSubtype(subTy, superTy, scope).isSubtype;
+        }
+        else
+        {
+            Unifier u{NotNull{&normalizer}, scope, Location{}, Covariant};
+
+            u.tryUnify(subTy, superTy);
+            return !u.failure;
+        }
     }
     else
     {
-        Unifier u{NotNull{&normalizer}, scope, Location{}, Covariant};
+        Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}, FFlag::LuauSolverV2 ? SolverMode::New : SolverMode::Old};
+        if (FFlag::LuauSolverV2)
+        {
+            Subtyping subtyping{builtinTypes, NotNull{&arena}, simplifier, NotNull{&normalizer}, NotNull{&typeFunctionRuntime}, NotNull{&ice}};
 
-        u.tryUnify(subTy, superTy);
-        return !u.failure;
+            return subtyping.isSubtype(subTy, superTy, scope).isSubtype;
+        }
+        else
+        {
+            Unifier u{NotNull{&normalizer}, scope, Location{}, Covariant};
+
+            u.tryUnify(subTy, superTy);
+            return !u.failure;
+        }
     }
 }
 
@@ -3500,30 +3433,50 @@ bool isSubtype(
     NotNull<Scope> scope,
     NotNull<BuiltinTypes> builtinTypes,
     NotNull<Simplifier> simplifier,
-    InternalErrorReporter& ice
+    InternalErrorReporter& ice,
+    SolverMode solverMode
 )
 {
     UnifierSharedState sharedState{&ice};
     TypeArena arena;
-    Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}};
     TypeCheckLimits limits;
     TypeFunctionRuntime typeFunctionRuntime{
         NotNull{&ice}, NotNull{&limits}
     }; // TODO: maybe subtyping checks should not invoke user-defined type function runtime
 
-    // Subtyping under DCR is not implemented using unification!
-    if (FFlag::LuauSolverV2)
+    if (FFlag::LuauUseWorkspacePropToChooseSolver)
     {
-        Subtyping subtyping{builtinTypes, NotNull{&arena}, simplifier, NotNull{&normalizer}, NotNull{&typeFunctionRuntime}, NotNull{&ice}};
+        Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}, solverMode};
+        if (solverMode == SolverMode::New)
+        {
+            Subtyping subtyping{builtinTypes, NotNull{&arena}, simplifier, NotNull{&normalizer}, NotNull{&typeFunctionRuntime}, NotNull{&ice}};
 
-        return subtyping.isSubtype(subPack, superPack, scope).isSubtype;
+            return subtyping.isSubtype(subPack, superPack, scope).isSubtype;
+        }
+        else
+        {
+            Unifier u{NotNull{&normalizer}, scope, Location{}, Covariant};
+
+            u.tryUnify(subPack, superPack);
+            return !u.failure;
+        }
     }
     else
     {
-        Unifier u{NotNull{&normalizer}, scope, Location{}, Covariant};
+        Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}, FFlag::LuauSolverV2 ? SolverMode::New : SolverMode::Old};
+        if (FFlag::LuauSolverV2)
+        {
+            Subtyping subtyping{builtinTypes, NotNull{&arena}, simplifier, NotNull{&normalizer}, NotNull{&typeFunctionRuntime}, NotNull{&ice}};
 
-        u.tryUnify(subPack, superPack);
-        return !u.failure;
+            return subtyping.isSubtype(subPack, superPack, scope).isSubtype;
+        }
+        else
+        {
+            Unifier u{NotNull{&normalizer}, scope, Location{}, Covariant};
+
+            u.tryUnify(subPack, superPack);
+            return !u.failure;
+        }
     }
 }
 

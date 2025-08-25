@@ -1,11 +1,12 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include "Luau/Ast.h"
 #include "Luau/Location.h"
 #include "Luau/NotNull.h"
 #include "Luau/Type.h"
+#include "Luau/TypeIds.h"
 #include "Luau/Variant.h"
-#include "Luau/Ast.h"
 
 #include <set>
 
@@ -464,7 +465,65 @@ struct ReservedIdentifier
 
 struct UnexpectedArrayLikeTableItem
 {
-    bool operator==(const UnexpectedArrayLikeTableItem&) const { return true; }
+    bool operator==(const UnexpectedArrayLikeTableItem&) const
+    {
+        return true;
+    }
+};
+
+struct CannotCheckDynamicStringFormatCalls
+{
+    bool operator==(const CannotCheckDynamicStringFormatCalls&) const
+    {
+        return true;
+    }
+};
+
+// Error during subtyping when the number of generic types between compared types does not match
+struct GenericTypeCountMismatch
+{
+    size_t subTyGenericCount;
+    size_t superTyGenericCount;
+
+    bool operator==(const GenericTypeCountMismatch& rhs) const;
+};
+
+// Error during subtyping when the number of generic type packs between compared types does not match
+struct GenericTypePackCountMismatch
+{
+    size_t subTyGenericPackCount;
+    size_t superTyGenericPackCount;
+
+    bool operator==(const GenericTypePackCountMismatch& rhs) const;
+};
+
+// Error during subtyping when the number of generic type packs between compared types does not match
+struct MultipleNonviableOverloads
+{
+    size_t attemptedArgCount;
+
+    bool operator==(const MultipleNonviableOverloads& rhs) const;
+};
+
+// Error where a type alias violates the recursive restraint, ie when a type alias T<A> has T with different arguments on the RHS.
+struct RecursiveRestraintViolation
+{
+    bool operator==(const RecursiveRestraintViolation& rhs) const
+    {
+        return true;
+    }
+};
+
+// Error during subtyping when the inferred bounds of a generic type are incompatible
+struct GenericBoundsMismatch
+{
+    std::string_view genericName;
+    std::vector<TypeId> lowerBounds;
+    std::vector<TypeId> upperBounds;
+
+    GenericBoundsMismatch(std::string_view genericName, TypeIds lowerBoundSet, TypeIds upperBoundSet);
+
+    bool operator==(const GenericBoundsMismatch& rhs) const;
 };
 
 using TypeErrorData = Variant<
@@ -518,7 +577,13 @@ using TypeErrorData = Variant<
     ExplicitFunctionAnnotationRecommended,
     UserDefinedTypeFunctionError,
     ReservedIdentifier,
-    UnexpectedArrayLikeTableItem>;
+    UnexpectedArrayLikeTableItem,
+    CannotCheckDynamicStringFormatCalls,
+    GenericTypeCountMismatch,
+    GenericTypePackCountMismatch,
+    MultipleNonviableOverloads,
+    RecursiveRestraintViolation,
+    GenericBoundsMismatch>;
 
 struct TypeErrorSummary
 {

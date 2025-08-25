@@ -7,7 +7,6 @@
 using namespace Luau;
 
 LUAU_FASTFLAG(LuauSolverV2)
-LUAU_FASTFLAG(LuauTableLiteralSubtypeSpecificCheck)
 
 TEST_SUITE_BEGIN("TypeSingletons");
 
@@ -280,7 +279,7 @@ TEST_CASE_FIXTURE(Fixture, "tagged_unions_immutable_tag")
         CannotAssignToNever* tm = get<CannotAssignToNever>(result.errors[0]);
         REQUIRE(tm);
 
-        CHECK(builtinTypes->stringType == tm->rhsType);
+        CHECK(getBuiltins()->stringType == tm->rhsType);
         CHECK(CannotAssignToNever::Reason::PropertyNarrowed == tm->reason);
         REQUIRE(tm->cause.size() == 2);
         CHECK("\"Dog\"" == toString(tm->cause[0]));
@@ -376,10 +375,7 @@ TEST_CASE_FIXTURE(Fixture, "indexer_can_be_union_of_singletons")
 
 TEST_CASE_FIXTURE(Fixture, "table_properties_type_error_escapes")
 {
-    ScopedFastFlag sffs[] = {
-        {FFlag::LuauSolverV2, true},
-        {FFlag::LuauTableLiteralSubtypeSpecificCheck, true},
-    };
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
     CheckResult result = check(R"(
         --!strict
@@ -389,14 +385,13 @@ TEST_CASE_FIXTURE(Fixture, "table_properties_type_error_escapes")
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    const std::string expected = R"(Table type '{ ["\n"]: number }' not compatible with type '{ ["<>"]: number }' because the former is missing field '<>')";
+    const std::string expected =
+        R"(Table type '{ ["\n"]: number }' not compatible with type '{ ["<>"]: number }' because the former is missing field '<>')";
     CHECK(expected == toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "error_detailed_tagged_union_mismatch_string")
 {
-    ScopedFastFlag _{FFlag::LuauTableLiteralSubtypeSpecificCheck, true};
-
     CheckResult result = check(R"(
 type Cat = { tag: 'cat', catfood: string }
 type Dog = { tag: 'dog', dogfood: string }
@@ -460,11 +455,10 @@ TEST_CASE_FIXTURE(Fixture, "parametric_tagged_union_alias")
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
     const std::string expectedError = "Type\n\t"
-        "'{ result: string, success: boolean }'"
-        "\ncould not be converted into\n\t"
-        "'Err<number> | Ok<string>'";
+                                      "'{ result: string, success: boolean }'"
+                                      "\ncould not be converted into\n\t"
+                                      "'Err<number> | Ok<string>'";
     CHECK(toString(result.errors[0]) == expectedError);
-
 }
 
 TEST_CASE_FIXTURE(Fixture, "if_then_else_expression_singleton_options")

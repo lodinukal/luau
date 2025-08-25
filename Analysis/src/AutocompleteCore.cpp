@@ -24,9 +24,8 @@ LUAU_FASTFLAG(LuauSolverV2)
 LUAU_FASTINT(LuauTypeInferIterationLimit)
 LUAU_FASTINT(LuauTypeInferRecursionLimit)
 LUAU_FASTFLAGVARIABLE(DebugLuauMagicVariableNames)
-LUAU_FASTFLAGVARIABLE(LuauAutocompleteUsesModuleForTypeCompatibility)
-LUAU_FASTFLAGVARIABLE(LuauAutocompleteMissingFollows)
-LUAU_FASTFLAG(LuauStoreReturnTypesAsPackOnAst)
+LUAU_FASTFLAG(LuauImplicitTableIndexerKeys3)
+LUAU_FASTFLAGVARIABLE(LuauIncludeBreakContinueStatements)
 
 static const std::unordered_set<std::string> kStatementStartingKeywords =
     {"while", "if", "local", "repeat", "function", "do", "for", "return", "break", "continue", "type", "export"};
@@ -79,8 +78,7 @@ static ParenthesesRecommendation getParenRecommendationForIntersect(const Inters
     ParenthesesRecommendation rec = ParenthesesRecommendation::None;
     for (Luau::TypeId partId : intersect->parts)
     {
-        if (FFlag::LuauAutocompleteMissingFollows)
-            partId = follow(partId);
+        partId = follow(partId);
         if (auto partFunc = Luau::get<FunctionType>(partId))
         {
             rec = std::max(rec, getParenRecommendationForFunc(partFunc, nodes));
@@ -162,79 +160,35 @@ static bool checkTypeMatch(
     InternalErrorReporter iceReporter;
     UnifierSharedState unifierState(&iceReporter);
     SimplifierPtr simplifier = newSimplifier(NotNull{typeArena}, builtinTypes);
-    Normalizer normalizer{typeArena, builtinTypes, NotNull{&unifierState}};
-    if (FFlag::LuauAutocompleteUsesModuleForTypeCompatibility)
+    Normalizer normalizer{typeArena, builtinTypes, NotNull{&unifierState}, module.checkedInNewSolver ? SolverMode::New : SolverMode::Old};
+    if (module.checkedInNewSolver)
     {
-        if (module.checkedInNewSolver)
-        {
-            TypeCheckLimits limits;
-            TypeFunctionRuntime typeFunctionRuntime{
-                NotNull{&iceReporter}, NotNull{&limits}
-            }; // TODO: maybe subtyping checks should not invoke user-defined type function runtime
+        TypeCheckLimits limits;
+        TypeFunctionRuntime typeFunctionRuntime{
+            NotNull{&iceReporter}, NotNull{&limits}
+        }; // TODO: maybe subtyping checks should not invoke user-defined type function runtime
 
-            unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
-            unifierState.counters.iterationLimit = FInt::LuauTypeInferIterationLimit;
+        unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
+        unifierState.counters.iterationLimit = FInt::LuauTypeInferIterationLimit;
 
-            Subtyping subtyping{
-                builtinTypes,
-                NotNull{typeArena},
-                NotNull{simplifier.get()},
-                NotNull{&normalizer},
-                NotNull{&typeFunctionRuntime},
-                NotNull{&iceReporter}
-            };
+        Subtyping subtyping{
+            builtinTypes, NotNull{typeArena}, NotNull{simplifier.get()}, NotNull{&normalizer}, NotNull{&typeFunctionRuntime}, NotNull{&iceReporter}
+        };
 
-            return subtyping.isSubtype(subTy, superTy, scope).isSubtype;
-        }
-        else
-        {
-            Unifier unifier(NotNull<Normalizer>{&normalizer}, scope, Location(), Variance::Covariant);
-
-            // Cost of normalization can be too high for autocomplete response time requirements
-            unifier.normalize = false;
-            unifier.checkInhabited = false;
-
-            unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
-            unifierState.counters.iterationLimit = FInt::LuauTypeInferIterationLimit;
-
-            return unifier.canUnify(subTy, superTy).empty();
-        }
+        return subtyping.isSubtype(subTy, superTy, scope).isSubtype;
     }
     else
     {
-        if (FFlag::LuauSolverV2)
-        {
-            TypeCheckLimits limits;
-            TypeFunctionRuntime typeFunctionRuntime{
-                NotNull{&iceReporter}, NotNull{&limits}
-            }; // TODO: maybe subtyping checks should not invoke user-defined type function runtime
+        Unifier unifier(NotNull<Normalizer>{&normalizer}, scope, Location(), Variance::Covariant);
 
-            unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
-            unifierState.counters.iterationLimit = FInt::LuauTypeInferIterationLimit;
+        // Cost of normalization can be too high for autocomplete response time requirements
+        unifier.normalize = false;
+        unifier.checkInhabited = false;
 
-            Subtyping subtyping{
-                builtinTypes,
-                NotNull{typeArena},
-                NotNull{simplifier.get()},
-                NotNull{&normalizer},
-                NotNull{&typeFunctionRuntime},
-                NotNull{&iceReporter}
-            };
+        unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
+        unifierState.counters.iterationLimit = FInt::LuauTypeInferIterationLimit;
 
-            return subtyping.isSubtype(subTy, superTy, scope).isSubtype;
-        }
-        else
-        {
-            Unifier unifier(NotNull<Normalizer>{&normalizer}, scope, Location(), Variance::Covariant);
-
-            // Cost of normalization can be too high for autocomplete response time requirements
-            unifier.normalize = false;
-            unifier.checkInhabited = false;
-            unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
-            unifierState.counters.iterationLimit = FInt::LuauTypeInferIterationLimit;
-
-            return unifier.canUnify(subTy, superTy).empty();
-        }
+        return unifier.canUnify(subTy, superTy).empty();
     }
 }
 
@@ -381,7 +335,7 @@ static void autocompleteProps(
                         continue;
                 }
                 else
-                    type = follow(prop.type());
+                    type = follow(prop.type_DEPRECATED());
 
                 TypeCorrectKind typeCorrect = indexType == PropIndexType::Key
                                                   ? TypeCorrectKind::Correct
@@ -413,7 +367,11 @@ static void autocompleteProps(
         auto indexIt = mtable->props.find("__index");
         if (indexIt != mtable->props.end())
         {
-            TypeId followed = follow(indexIt->second.type());
+            TypeId followed;
+            if (FFlag::LuauSolverV2)
+                followed = follow(*indexIt->second.readTy);
+            else
+                followed = follow(indexIt->second.type_DEPRECATED());
             if (get<TableType>(followed) || get<MetatableType>(followed))
             {
                 autocompleteProps(module, typeArena, builtinTypes, rootTy, followed, indexType, nodes, result, seen);
@@ -618,16 +576,40 @@ static void autocompleteStringSingleton(TypeId ty, bool addQuotes, AstNode* node
 
     ty = follow(ty);
 
-    if (auto ss = get<StringSingleton>(get<SingletonType>(ty)))
+    if (FFlag::LuauImplicitTableIndexerKeys3)
     {
-        result[formatKey(ss->value)] = AutocompleteEntry{AutocompleteEntryKind::String, ty, false, false, TypeCorrectKind::Correct};
-    }
-    else if (auto uty = get<UnionType>(ty))
-    {
-        for (auto el : uty)
+        if (auto ss = get<StringSingleton>(get<SingletonType>(ty)))
         {
-            if (auto ss = get<StringSingleton>(get<SingletonType>(el)))
-                result[formatKey(ss->value)] = AutocompleteEntry{AutocompleteEntryKind::String, ty, false, false, TypeCorrectKind::Correct};
+            // This is purposefully `try_emplace` as we don't want to override any existing entries.
+            result.try_emplace(formatKey(ss->value), AutocompleteEntry{AutocompleteEntryKind::String, ty, false, false, TypeCorrectKind::Correct});
+        }
+        else if (auto uty = get<UnionType>(ty))
+        {
+            for (auto el : uty)
+            {
+                if (auto ss = get<StringSingleton>(get<SingletonType>(el)))
+                {
+                    // This is purposefully `try_emplace` as we don't want to override any existing entries.
+                    result.try_emplace(
+                        formatKey(ss->value), AutocompleteEntry{AutocompleteEntryKind::String, ty, false, false, TypeCorrectKind::Correct}
+                    );
+                }
+            }
+        }
+    }
+    else
+    {
+        if (auto ss = get<StringSingleton>(get<SingletonType>(ty)))
+        {
+            result[formatKey(ss->value)] = AutocompleteEntry{AutocompleteEntryKind::String, ty, false, false, TypeCorrectKind::Correct};
+        }
+        else if (auto uty = get<UnionType>(ty))
+        {
+            for (auto el : uty)
+            {
+                if (auto ss = get<StringSingleton>(get<SingletonType>(el)))
+                    result[formatKey(ss->value)] = AutocompleteEntry{AutocompleteEntryKind::String, ty, false, false, TypeCorrectKind::Correct};
+            }
         }
     }
 };
@@ -697,7 +679,6 @@ static std::optional<TypeId> findTypeElementAt(const AstTypeList& astTypeList, T
 
 static std::optional<TypeId> findTypeElementAt(AstTypePack* astTypePack, TypePackId tp, Position position)
 {
-    LUAU_ASSERT(FFlag::LuauStoreReturnTypesAsPackOnAst);
     if (const auto typePack = astTypePack->as<AstTypePackExplicit>())
     {
         return findTypeElementAt(typePack->typeList, tp, position);
@@ -739,16 +720,8 @@ static std::optional<TypeId> findTypeElementAt(AstType* astType, TypeId ty, Posi
         if (auto element = findTypeElementAt(type->argTypes, ftv->argTypes, position))
             return element;
 
-        if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-        {
-            if (auto element = findTypeElementAt(type->returnTypes, ftv->retTypes, position))
-                return element;
-        }
-        else
-        {
-            if (auto element = findTypeElementAt(type->returnTypes_DEPRECATED, ftv->retTypes, position))
-                return element;
-        }
+        if (auto element = findTypeElementAt(type->returnTypes, ftv->retTypes, position))
+            return element;
     }
 
     // It's possible to walk through other types like intrsection and unions if we find value in doing that
@@ -805,7 +778,7 @@ static bool tryAddTypeCorrectSuggestion(AutocompleteEntryMap& result, ScopePtr s
     if (!ty)
         return false;
 
-    if (auto name = tryGetTypeNameInScope(scope, *ty))
+    if (auto name = tryGetTypeNameInScope(std::move(scope), *ty))
     {
         if (auto it = result.find(*name); it != result.end())
             it->second.typeCorrect = TypeCorrectKind::Correct;
@@ -1011,7 +984,7 @@ AutocompleteEntryMap autocompleteTypeNames(
                 }
 
                 if (inferredType)
-                    tryAddTypeCorrectSuggestion(result, startScope, topType, inferredType, position);
+                    tryAddTypeCorrectSuggestion(result, std::move(startScope), topType, inferredType, position);
 
                 break;
             }
@@ -1078,65 +1051,14 @@ AutocompleteEntryMap autocompleteTypeNames(
             }
         }
 
-        if (FFlag::LuauStoreReturnTypesAsPackOnAst)
+        if (!node->returnAnnotation)
+            return result;
+
+        if (const auto typePack = node->returnAnnotation->as<AstTypePackExplicit>())
         {
-            if (!node->returnAnnotation)
-                return result;
-
-            if (const auto typePack = node->returnAnnotation->as<AstTypePackExplicit>())
+            for (size_t i = 0; i < typePack->typeList.types.size; i++)
             {
-                for (size_t i = 0; i < typePack->typeList.types.size; i++)
-                {
-                    AstType* ret = typePack->typeList.types.data[i];
-
-                    if (ret->location.containsClosed(position))
-                    {
-                        if (const FunctionType* ftv = tryGetExpectedFunctionType(module, node))
-                        {
-                            if (auto ty = tryGetTypePackTypeAt(ftv->retTypes, i))
-                                tryAddTypeCorrectSuggestion(result, startScope, topType, *ty, position);
-                        }
-
-                        // TODO: with additional type information, we could suggest inferred return type here
-                        break;
-                    }
-                }
-
-                if (AstTypePack* retTp = typePack->typeList.tailType)
-                {
-                    if (auto variadic = retTp->as<AstTypePackVariadic>())
-                    {
-                        if (variadic->location.containsClosed(position))
-                        {
-                            if (const FunctionType* ftv = tryGetExpectedFunctionType(module, node))
-                            {
-                                if (auto ty = tryGetTypePackTypeAt(ftv->retTypes, ~0u))
-                                    tryAddTypeCorrectSuggestion(result, startScope, topType, *ty, position);
-                            }
-                        }
-                    }
-                }
-            }
-            else if (auto variadic = node->returnAnnotation->as<AstTypePackVariadic>())
-            {
-                if (variadic->location.containsClosed(position))
-                {
-                    if (const FunctionType* ftv = tryGetExpectedFunctionType(module, node))
-                    {
-                        if (auto ty = tryGetTypePackTypeAt(ftv->retTypes, ~0u))
-                            tryAddTypeCorrectSuggestion(result, startScope, topType, *ty, position);
-                    }
-                }
-            }
-        }
-        else
-        {
-            if (!node->returnAnnotation_DEPRECATED)
-                return result;
-
-            for (size_t i = 0; i < node->returnAnnotation_DEPRECATED->types.size; i++)
-            {
-                AstType* ret = node->returnAnnotation_DEPRECATED->types.data[i];
+                AstType* ret = typePack->typeList.types.data[i];
 
                 if (ret->location.containsClosed(position))
                 {
@@ -1151,7 +1073,7 @@ AutocompleteEntryMap autocompleteTypeNames(
                 }
             }
 
-            if (AstTypePack* retTp = node->returnAnnotation_DEPRECATED->tailType)
+            if (AstTypePack* retTp = typePack->typeList.tailType)
             {
                 if (auto variadic = retTp->as<AstTypePackVariadic>())
                 {
@@ -1160,9 +1082,20 @@ AutocompleteEntryMap autocompleteTypeNames(
                         if (const FunctionType* ftv = tryGetExpectedFunctionType(module, node))
                         {
                             if (auto ty = tryGetTypePackTypeAt(ftv->retTypes, ~0u))
-                                tryAddTypeCorrectSuggestion(result, startScope, topType, *ty, position);
+                                tryAddTypeCorrectSuggestion(result, std::move(startScope), topType, *ty, position);
                         }
                     }
+                }
+            }
+        }
+        else if (auto variadic = node->returnAnnotation->as<AstTypePackVariadic>())
+        {
+            if (variadic->location.containsClosed(position))
+            {
+                if (const FunctionType* ftv = tryGetExpectedFunctionType(module, node))
+                {
+                    if (auto ty = tryGetTypePackTypeAt(ftv->retTypes, ~0u))
+                        tryAddTypeCorrectSuggestion(result, std::move(startScope), topType, *ty, position);
                 }
             }
         }
@@ -1278,6 +1211,28 @@ static bool isBindingLegalAtCurrentPosition(const Symbol& symbol, const Binding&
     return binding.location == Location() || !binding.location.containsClosed(pos);
 }
 
+static bool isValidBreakContinueContext(const std::vector<AstNode*>& ancestry, Position position)
+{
+    LUAU_ASSERT(FFlag::LuauIncludeBreakContinueStatements);
+    for (auto it = ancestry.rbegin(); it != ancestry.rend(); ++it)
+    {
+        if ((*it)->is<AstStatFunction>() || (*it)->is<AstStatLocalFunction>() || (*it)->is<AstExprFunction>() || (*it)->is<AstStatTypeFunction>() ||
+            (*it)->is<AstTypeFunction>())
+            return false;
+
+        if (auto statWhile = (*it)->as<AstStatWhile>(); statWhile && statWhile->body->location.contains(position))
+            return true;
+        else if (auto statFor = (*it)->as<AstStatFor>(); statFor && statFor->body->location.contains(position))
+            return true;
+        else if (auto statForIn = (*it)->as<AstStatForIn>(); statForIn && statForIn->body->location.contains(position))
+            return true;
+        else if (auto statRepeat = (*it)->as<AstStatRepeat>(); statRepeat && statRepeat->body->location.contains(position))
+            return true;
+    }
+
+    return false;
+}
+
 static AutocompleteEntryMap autocompleteStatement(
     const Module& module,
     const std::vector<AstNode*>& ancestry,
@@ -1322,8 +1277,20 @@ static AutocompleteEntryMap autocompleteStatement(
         scope = scope->parent;
     }
 
-    for (const auto& kw : kStatementStartingKeywords)
-        result.emplace(kw, AutocompleteEntry{AutocompleteEntryKind::Keyword});
+    if (FFlag::LuauIncludeBreakContinueStatements)
+    {
+        bool shouldIncludeBreakAndContinue = isValidBreakContinueContext(ancestry, position);
+        for (const auto& kw : kStatementStartingKeywords)
+        {
+            if ((kw != "break" && kw != "continue") || shouldIncludeBreakAndContinue)
+                result.emplace(kw, AutocompleteEntry{AutocompleteEntryKind::Keyword});
+        }
+    }
+    else
+    {
+        for (const auto& kw : kStatementStartingKeywords)
+            result.emplace(kw, AutocompleteEntry{AutocompleteEntryKind::Keyword});
+    }
 
     for (auto it = ancestry.rbegin(); it != ancestry.rend(); ++it)
     {
@@ -1399,7 +1366,7 @@ static bool autocompleteIfElseExpression(
     if (node->is<AstExprIfElse>())
     {
         // Don't try to complete when the current node is an if-else expression (i.e. only try to complete when the node is a child of an if-else
-        // expression.
+        // expression).
         return true;
     }
 
@@ -1530,7 +1497,7 @@ static AutocompleteResult autocompleteExpression(
 {
     AutocompleteEntryMap result;
     AutocompleteContext context = autocompleteExpression(module, builtinTypes, typeArena, ancestry, scopeAtPosition, position, result);
-    return {result, ancestry, context};
+    return {std::move(result), ancestry, context};
 }
 
 static std::optional<const ExternType*> getMethodContainingExternType(const ModulePtr& module, AstExpr* funcExpr)
@@ -1701,8 +1668,7 @@ static std::optional<AutocompleteEntryMap> autocompleteStringParams(
     {
         for (TypeId part : intersect->parts)
         {
-            if (FFlag::LuauAutocompleteMissingFollows)
-                part = follow(part);
+            part = follow(part);
             if (auto candidateFunctionType = Luau::get<FunctionType>(part))
             {
                 if (std::optional<AutocompleteEntryMap> ret = performCallback(candidateFunctionType))
@@ -2070,7 +2036,7 @@ AutocompleteResult autocomplete_(
                     if (!key)
                         autocompleteExpression(*module, builtinTypes, typeArena, ancestry, scopeAtPosition, position, result);
 
-                    return {result, ancestry, AutocompleteContext::Property};
+                    return {std::move(result), ancestry, AutocompleteContext::Property};
                 }
 
                 break;
@@ -2106,12 +2072,12 @@ AutocompleteResult autocomplete_(
         // Also offer general expression suggestions
         autocompleteExpression(*module, builtinTypes, typeArena, ancestry, scopeAtPosition, position, result);
 
-        return {result, ancestry, AutocompleteContext::Property};
+        return {std::move(result), ancestry, AutocompleteContext::Property};
     }
     else if (isIdentifier(node) && (parent->is<AstStatExpr>() || parent->is<AstStatError>()))
         return {autocompleteStatement(*module, ancestry, scopeAtPosition, position), ancestry, AutocompleteContext::Statement};
 
-    if (std::optional<AutocompleteEntryMap> ret = autocompleteStringParams(module, ancestry, position, fileResolver, callback))
+    if (std::optional<AutocompleteEntryMap> ret = autocompleteStringParams(module, ancestry, position, fileResolver, std::move(callback)))
     {
         return {*ret, ancestry, AutocompleteContext::String};
     }
@@ -2119,8 +2085,11 @@ AutocompleteResult autocomplete_(
     {
         AutocompleteEntryMap result;
 
-        if (auto it = module->astExpectedTypes.find(node->asExpr()))
-            autocompleteStringSingleton(*it, false, node, position, result);
+        if (!FFlag::LuauImplicitTableIndexerKeys3)
+        {
+            if (auto it = module->astExpectedTypes.find(node->asExpr()))
+                autocompleteStringSingleton(*it, false, node, position, result);
+        }
 
         if (ancestry.size() >= 2)
         {
@@ -2139,14 +2108,20 @@ AutocompleteResult autocomplete_(
             }
         }
 
-        return {result, ancestry, AutocompleteContext::String};
+        if (FFlag::LuauImplicitTableIndexerKeys3)
+        {
+            if (auto it = module->astExpectedTypes.find(node->asExpr()))
+                autocompleteStringSingleton(*it, false, node, position, result);
+        }
+
+        return {std::move(result), ancestry, AutocompleteContext::String};
     }
     else if (stringPartOfInterpString(node, position))
     {
         // We're not a simple interpolated string, we're something like `a{"b"}@1`, and we
         // can't know what to format to
         AutocompleteEntryMap map;
-        return {map, ancestry, AutocompleteContext::String};
+        return {std::move(map), ancestry, AutocompleteContext::String};
     }
 
     if (node->is<AstExprConstantNumber>())

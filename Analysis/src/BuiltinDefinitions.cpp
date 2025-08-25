@@ -2,6 +2,7 @@
 #include "Luau/BuiltinDefinitions.h"
 
 #include "Luau/Ast.h"
+#include "Luau/BuiltinTypeFunctions.h"
 #include "Luau/Clone.h"
 #include "Luau/Common.h"
 #include "Luau/ConstraintGenerator.h"
@@ -10,10 +11,10 @@
 #include "Luau/Error.h"
 #include "Luau/Frontend.h"
 #include "Luau/InferPolarity.h"
+#include "Luau/Module.h"
 #include "Luau/NotNull.h"
 #include "Luau/Subtyping.h"
 #include "Luau/Symbol.h"
-#include "Luau/ToString.h"
 #include "Luau/Type.h"
 #include "Luau/TypeChecker2.h"
 #include "Luau/TypeFunction.h"
@@ -22,6 +23,7 @@
 #include "Luau/TypeUtils.h"
 
 #include <algorithm>
+#include <string_view>
 
 /** FIXME: Many of these type definitions are not quite completely accurate.
  *
@@ -30,10 +32,10 @@
  */
 
 LUAU_FASTFLAG(LuauSolverV2)
-LUAU_FASTFLAG(LuauNonReentrantGeneralization3)
+LUAU_FASTFLAG(LuauEagerGeneralization4)
 LUAU_FASTFLAGVARIABLE(LuauTableCloneClonesType3)
-LUAU_FASTFLAGVARIABLE(LuauMagicFreezeCheckBlocked2)
-LUAU_FASTFLAGVARIABLE(LuauFormatUseLastPosition)
+LUAU_FASTFLAG(LuauUseWorkspacePropToChooseSolver)
+LUAU_FASTFLAG(LuauEmplaceNotPushBack)
 
 namespace Luau
 {
@@ -190,18 +192,29 @@ TypeId makeFunction(
     FunctionType ftv{generics, genericPacks, paramPack, retPack, {}, selfType.has_value()};
 
     if (selfType)
-        ftv.argNames.push_back(Luau::FunctionArgument{"self", {}});
+    {
+        if (FFlag::LuauEmplaceNotPushBack)
+            ftv.argNames.emplace_back(Luau::FunctionArgument{"self", {}});
+        else
+            ftv.argNames.push_back(Luau::FunctionArgument{"self", {}});
+    }
 
     if (paramNames.size() != 0)
     {
         for (auto&& p : paramNames)
-            ftv.argNames.push_back(Luau::FunctionArgument{std::move(p), {}});
+            if (FFlag::LuauEmplaceNotPushBack)
+                ftv.argNames.emplace_back(Luau::FunctionArgument{p, Location{}});
+            else
+                ftv.argNames.push_back(Luau::FunctionArgument{std::move(p), {}});
     }
     else if (selfType)
     {
         // If argument names were not provided, but we have already added a name for 'self' argument, we have to fill remaining slots as well
         for (size_t i = 0; i < paramTypes.size(); i++)
-            ftv.argNames.push_back(std::nullopt);
+            if (FFlag::LuauEmplaceNotPushBack)
+                ftv.argNames.emplace_back(std::nullopt);
+            else
+                ftv.argNames.push_back(std::nullopt);
     }
 
     ftv.isCheckedFunction = checked;
@@ -236,7 +249,7 @@ void addGlobalBinding(GlobalTypes& globals, const std::string& name, TypeId ty, 
 
 void addGlobalBinding(GlobalTypes& globals, const std::string& name, Binding binding)
 {
-    addGlobalBinding(globals, globals.globalScope, name, binding);
+    addGlobalBinding(globals, globals.globalScope, name, std::move(binding));
 }
 
 void addGlobalBinding(GlobalTypes& globals, const ScopePtr& scope, const std::string& name, TypeId ty, const std::string& packageName)
@@ -310,11 +323,11 @@ void registerBuiltinGlobals(Frontend& frontend, GlobalTypes& globals, bool typeC
 
     TypeArena& arena = globals.globalTypes;
     NotNull<BuiltinTypes> builtinTypes = globals.builtinTypes;
-    Scope* globalScope = nullptr; // NotNull<Scope> when removing FFlag::LuauNonReentrantGeneralization3
-    if (FFlag::LuauNonReentrantGeneralization3)
+    Scope* globalScope = nullptr; // NotNull<Scope> when removing FFlag::LuauEagerGeneralization4
+    if (FFlag::LuauEagerGeneralization4)
         globalScope = globals.globalScope.get();
 
-    if (FFlag::LuauSolverV2)
+    if (frontend.getLuauSolverMode() == SolverMode::New)
         builtinTypeFunctions().addToScope(NotNull{&arena}, NotNull{globals.globalScope.get()});
 
     LoadDefinitionFileResult loadResult = frontend.loadDefinitionFile(
@@ -334,7 +347,8 @@ void registerBuiltinGlobals(Frontend& frontend, GlobalTypes& globals, bool typeC
     auto it = stringMetatableTable->props.find("__index");
     LUAU_ASSERT(it != stringMetatableTable->props.end());
 
-    addGlobalBinding(globals, "string", it->second.type(), "@luau");
+    addGlobalBinding(globals, "string", *it->second.readTy, "@luau");
+    addGlobalBinding(globals, "string", *it->second.writeTy, "@luau");
 
     // Setup 'vector' metatable
     if (auto it = globals.globalScope->exportedTypeBindings.find("vector"); it != globals.globalScope->exportedTypeBindings.end())
@@ -374,31 +388,34 @@ void registerBuiltinGlobals(Frontend& frontend, GlobalTypes& globals, bool typeC
     TypeId genericMT = arena.addType(GenericType{globalScope, "MT"});
 
     TableType tab{TableState::Generic, globals.globalScope->level};
-    TypeId tabTy = arena.addType(tab);
+    TypeId tabTy = arena.addType(std::move(tab));
 
     TypeId tableMetaMT = arena.addType(MetatableType{tabTy, genericMT});
 
-    // getmetatable : <MT>({ @metatable MT, {+ +} }) -> MT
-    addGlobalBinding(globals, "getmetatable", makeFunction(arena, std::nullopt, {genericMT}, {}, {tableMetaMT}, {genericMT}), "@luau");
+    TypeId genericT = arena.addType(GenericType{globalScope, "T"});
 
-    if (FFlag::LuauSolverV2)
+    if (frontend.getLuauSolverMode() == SolverMode::New)
     {
-        TypeId genericT = arena.addType(GenericType{globalScope, "T"});
-        TypeId tMetaMT = arena.addType(MetatableType{genericT, genericMT});
+        // getmetatable : <T>(T) -> getmetatable<T>
+        TypeId getmtReturn = arena.addType(TypeFunctionInstanceType{builtinTypeFunctions().getmetatableFunc, {genericT}});
+        addGlobalBinding(globals, "getmetatable", makeFunction(arena, std::nullopt, {genericT}, {}, {genericT}, {getmtReturn}), "@luau");
+    }
+    else
+    {
+        // getmetatable : <MT>({ @metatable MT, {+ +} }) -> MT
+        addGlobalBinding(globals, "getmetatable", makeFunction(arena, std::nullopt, {genericMT}, {}, {tableMetaMT}, {genericMT}), "@luau");
+    }
 
-        // clang-format off
-        // setmetatable<T: {}, MT>(T, MT) -> { @metatable MT, T }
-        addGlobalBinding(globals, "setmetatable",
-            arena.addType(
-                FunctionType{
-                    {genericT, genericMT},
-                    {},
-                    arena.addTypePack(TypePack{{genericT, genericMT}}),
-                    arena.addTypePack(TypePack{{tMetaMT}})
-                }
-            ), "@luau"
+    if (frontend.getLuauSolverMode() == SolverMode::New)
+    {
+        // setmetatable<T: {}, MT>(T, MT) -> setmetatable<T, MT>
+        TypeId setmtReturn = arena.addType(TypeFunctionInstanceType{builtinTypeFunctions().setmetatableFunc, {genericT, genericMT}});
+        addGlobalBinding(
+            globals,
+            "setmetatable",
+            makeFunction(arena, std::nullopt, {genericT, genericMT}, {}, {genericT, genericMT}, {setmtReturn}),
+            "@luau"
         );
-        // clang-format on
     }
     else
     {
@@ -421,7 +438,7 @@ void registerBuiltinGlobals(Frontend& frontend, GlobalTypes& globals, bool typeC
 
     attachMagicFunction(getGlobalBinding(globals, "assert"), std::make_shared<MagicAssert>());
 
-    if (FFlag::LuauSolverV2)
+    if (frontend.getLuauSolverMode() == SolverMode::New)
     {
         // declare function assert<T>(value: T, errorMessage: string?): intersect<T, ~(false?)>
         TypeId genericT = arena.addType(GenericType{globalScope, "T"});
@@ -440,7 +457,7 @@ void registerBuiltinGlobals(Frontend& frontend, GlobalTypes& globals, bool typeC
 
     if (TableType* ttv = getMutable<TableType>(getGlobalBinding(globals, "table")))
     {
-        if (FFlag::LuauSolverV2)
+        if (frontend.getLuauSolverMode() == SolverMode::New)
         {
             // CLI-114044 - The new solver does not yet support generic tables,
             // which act, in an odd way, like generics that are constrained to
@@ -471,10 +488,10 @@ void registerBuiltinGlobals(Frontend& frontend, GlobalTypes& globals, bool typeC
         ttv->props["foreach"].deprecated = true;
         ttv->props["foreachi"].deprecated = true;
 
-        attachMagicFunction(ttv->props["pack"].type(), std::make_shared<MagicPack>());
+        attachMagicFunction(*ttv->props["pack"].readTy, std::make_shared<MagicPack>());
         if (FFlag::LuauTableCloneClonesType3)
-            attachMagicFunction(ttv->props["clone"].type(), std::make_shared<MagicClone>());
-        attachMagicFunction(ttv->props["freeze"].type(), std::make_shared<MagicFreeze>());
+            attachMagicFunction(*ttv->props["clone"].readTy, std::make_shared<MagicClone>());
+        attachMagicFunction(*ttv->props["freeze"].readTy, std::make_shared<MagicFreeze>());
     }
 
     TypeId requireTy = getGlobalBinding(globals, "require");
@@ -486,7 +503,7 @@ void registerBuiltinGlobals(Frontend& frontend, GlobalTypes& globals, bool typeC
     globals.globalTypeFunctionScope->builtinTypeNames = globals.globalScope->builtinTypeNames;
 
     // Type function runtime also removes a few standard libraries and globals, so we will take only the ones that are defined
-    static const char* typeFunctionRuntimeBindings[] = {
+    static constexpr const char* typeFunctionRuntimeBindings[] = {
         // Libraries
         "math",
         "table",
@@ -575,7 +592,7 @@ std::optional<WithPredicate<TypePackId>> MagicFormat::handleOldSolver(
     WithPredicate<TypePackId> withPredicate
 )
 {
-    auto [paramPack, _predicates] = withPredicate;
+    auto [paramPack, _predicates] = std::move(withPredicate);
 
     TypeArena& arena = typechecker.currentModule->internalTypes;
 
@@ -622,22 +639,36 @@ bool MagicFormat::infer(const MagicFunctionCallContext& context)
 {
     TypeArena* arena = context.solver->arena;
 
+    auto iter = begin(context.arguments);
+
+    // we'll suppress any errors for `string.format` if the format string is error suppressing.
+    if (iter == end(context.arguments) || shouldSuppressErrors(context.solver->normalizer, follow(*iter)) == ErrorSuppression::Suppress)
+    {
+        TypePackId resultPack = arena->addTypePack({context.solver->builtinTypes->stringType});
+        asMutable(context.result)->ty.emplace<BoundTypePack>(resultPack);
+        return true;
+    }
+
     AstExprConstantString* fmt = nullptr;
     if (auto index = context.callSite->func->as<AstExprIndexName>(); index && context.callSite->self)
-    {
-        if (auto group = index->expr->as<AstExprGroup>())
-            fmt = group->expr->as<AstExprConstantString>();
-        else
-            fmt = index->expr->as<AstExprConstantString>();
-    }
+        fmt = unwrapGroup(index->expr)->as<AstExprConstantString>();
 
     if (!context.callSite->self && context.callSite->args.size > 0)
         fmt = context.callSite->args.data[0]->as<AstExprConstantString>();
 
-    if (!fmt)
+    std::optional<std::string_view> formatString;
+    if (fmt)
+        formatString = {fmt->value.data, fmt->value.size};
+    else if (auto singleton = get<SingletonType>(follow(*iter)))
+    {
+        if (auto stringSingleton = get<StringSingleton>(singleton))
+            formatString = {stringSingleton->value};
+    }
+
+    if (!formatString)
         return false;
 
-    std::vector<TypeId> expected = parseFormatString(context.solver->builtinTypes, fmt->value.data, fmt->value.size);
+    std::vector<TypeId> expected = parseFormatString(context.solver->builtinTypes, formatString->data(), formatString->size());
     const auto& [params, tail] = flatten(context.arguments);
 
     size_t paramOffset = 1;
@@ -664,67 +695,87 @@ bool MagicFormat::infer(const MagicFunctionCallContext& context)
 
 bool MagicFormat::typeCheck(const MagicFunctionTypeCheckContext& context)
 {
-    AstExprConstantString* fmt = nullptr;
-    if (auto index = context.callSite->func->as<AstExprIndexName>(); index && context.callSite->self)
+    auto iter = begin(context.arguments);
+
+    if (iter == end(context.arguments))
     {
-        if (auto group = index->expr->as<AstExprGroup>())
-            fmt = group->expr->as<AstExprConstantString>();
-        else
-            fmt = index->expr->as<AstExprConstantString>();
-    }
+        context.typechecker->reportError(
+            CountMismatch{1, std::nullopt, 0, CountMismatch::Arg, true, "string.format"}, context.callSite->location
+            );
+            return true;
+        }
 
-    if (!context.callSite->self && context.callSite->args.size > 0)
-        fmt = context.callSite->args.data[0]->as<AstExprConstantString>();
-
-    if (!fmt)
-    {
-        context.typechecker->reportError(CountMismatch{1, std::nullopt, 0, CountMismatch::Arg, true, "string.format"}, context.callSite->location);
-        return true;
-    }
-
-    // CLI-150726: The block below effectively constructs a type pack and then type checks it by going parameter-by-parameter.
-    // This does _not_ handle cases like:
-    //
-    //  local foo : () -> (...string) = (nil :: any)
-    //  print(string.format("%s %d %s", foo()))
-    //
-    // ... which should be disallowed.
-
-    std::vector<TypeId> expected = parseFormatString(context.builtinTypes, fmt->value.data, fmt->value.size);
-    const auto& [params, tail] = flatten(context.arguments);
-
-    size_t paramOffset = 1;
-    // Compare the expressions passed with the types the function expects to determine whether this function was called with : or .
-    bool calledWithSelf = expected.size() == context.callSite->args.size;
-    // unify the prefix one argument at a time
-    for (size_t i = 0; i < expected.size() && i + paramOffset < params.size(); ++i)
-    {
-        TypeId actualTy = params[i + paramOffset];
-        TypeId expectedTy = expected[i];
-        Location location = FFlag::LuauFormatUseLastPosition
-            ? context.callSite->args.data[std::min(context.callSite->args.size - 1, i + (calledWithSelf ? 0 : paramOffset))]->location
-            : context.callSite->args.data[i + (calledWithSelf ? 0 : paramOffset)]->location;
-        // use subtyping instead here
-        SubtypingResult result = context.typechecker->subtyping->isSubtype(actualTy, expectedTy, context.checkScope);
-
-        if (!result.isSubtype)
+        // we'll suppress any errors for `string.format` if the format string is error suppressing.
+        if (shouldSuppressErrors(NotNull{&context.typechecker->normalizer}, follow(*iter)) == ErrorSuppression::Suppress)
         {
-            switch (shouldSuppressErrors(NotNull{&context.typechecker->normalizer}, actualTy))
-            {
-            case ErrorSuppression::Suppress:
-                break;
-            case ErrorSuppression::NormalizationFailed:
-                break;
-            case ErrorSuppression::DoNotSuppress:
-                Reasonings reasonings = context.typechecker->explainReasonings(actualTy, expectedTy, location, result);
+            return true;
+        }
 
-                if (!reasonings.suppressed)
-                    context.typechecker->reportError(TypeMismatch{expectedTy, actualTy, reasonings.toString()}, location);
+        AstExprConstantString* fmt = nullptr;
+        if (auto index = context.callSite->func->as<AstExprIndexName>(); index && context.callSite->self)
+            fmt = unwrapGroup(index->expr)->as<AstExprConstantString>();
+
+        if (!context.callSite->self && context.callSite->args.size > 0)
+            fmt = context.callSite->args.data[0]->as<AstExprConstantString>();
+
+        std::optional<std::string_view> formatString;
+        if (fmt)
+            formatString = {fmt->value.data, fmt->value.size};
+        else if (auto singleton = get<SingletonType>(follow(*iter)))
+        {
+            if (auto stringSingleton = get<StringSingleton>(singleton))
+                formatString = {stringSingleton->value};
+        }
+
+        if (!formatString)
+        {
+            context.typechecker->reportError(CannotCheckDynamicStringFormatCalls{}, context.callSite->location);
+            return true;
+        }
+
+        // CLI-150726: The block below effectively constructs a type pack and then type checks it by going parameter-by-parameter.
+        // This does _not_ handle cases like:
+        //
+        //  local foo : () -> (...string) = (nil :: any)
+        //  print(string.format("%s %d %s", foo()))
+        //
+        // ... which should be disallowed.
+
+        std::vector<TypeId> expected = parseFormatString(context.builtinTypes, formatString->data(), formatString->size());
+
+        const auto& [params, tail] = flatten(context.arguments);
+
+        size_t paramOffset = 1;
+        // Compare the expressions passed with the types the function expects to determine whether this function was called with : or .
+        bool calledWithSelf = expected.size() == context.callSite->args.size;
+        // unify the prefix one argument at a time
+        for (size_t i = 0; i < expected.size() && i + paramOffset < params.size(); ++i)
+        {
+            TypeId actualTy = params[i + paramOffset];
+            TypeId expectedTy = expected[i];
+            Location location =
+                context.callSite->args.data[std::min(context.callSite->args.size - 1, i + (calledWithSelf ? 0 : paramOffset))]->location;
+            // use subtyping instead here
+            SubtypingResult result = context.typechecker->subtyping->isSubtype(actualTy, expectedTy, context.checkScope);
+
+            if (!result.isSubtype)
+            {
+                switch (shouldSuppressErrors(NotNull{&context.typechecker->normalizer}, actualTy))
+                {
+                    case ErrorSuppression::Suppress:
+                        break;
+                    case ErrorSuppression::NormalizationFailed:
+                        break;
+                    case ErrorSuppression::DoNotSuppress:
+                        Reasonings reasonings = context.typechecker->explainReasonings(actualTy, expectedTy, location, result);
+
+                        if (!reasonings.suppressed)
+                            context.typechecker->reportError(TypeMismatch{expectedTy, actualTy, reasonings.toString()}, location);
+                }
             }
         }
-    }
 
-    return true;
+        return true;
 }
 
 static std::vector<TypeId> parsePatternString(NotNull<BuiltinTypes> builtinTypes, const char* data, size_t size)
@@ -794,7 +845,7 @@ std::optional<WithPredicate<TypePackId>> MagicGmatch::handleOldSolver(
     WithPredicate<TypePackId> withPredicate
 )
 {
-    auto [paramPack, _predicates] = withPredicate;
+    auto [paramPack, _predicates] = std::move(withPredicate);
     const auto& [params, tail] = flatten(paramPack);
 
     if (params.size() != 2)
@@ -818,7 +869,7 @@ std::optional<WithPredicate<TypePackId>> MagicGmatch::handleOldSolver(
     typechecker.unify(params[0], typechecker.stringType, scope, expr.args.data[0]->location);
 
     const TypePackId emptyPack = arena.addTypePack({});
-    const TypePackId returnList = arena.addTypePack(returnTypes);
+    const TypePackId returnList = arena.addTypePack(std::move(returnTypes));
     const TypeId iteratorType = arena.addType(FunctionType{emptyPack, returnList});
     return WithPredicate<TypePackId>{arena.addTypePack({iteratorType})};
 }
@@ -848,7 +899,7 @@ bool MagicGmatch::infer(const MagicFunctionCallContext& context)
     context.solver->unify(context.constraint, params[0], context.solver->builtinTypes->stringType);
 
     const TypePackId emptyPack = arena->addTypePack({});
-    const TypePackId returnList = arena->addTypePack(returnTypes);
+    const TypePackId returnList = arena->addTypePack(std::move(returnTypes));
     const TypeId iteratorType = arena->addType(FunctionType{emptyPack, returnList});
     const TypePackId resTypePack = arena->addTypePack({iteratorType});
     asMutable(context.result)->ty.emplace<BoundTypePack>(resTypePack);
@@ -863,7 +914,7 @@ std::optional<WithPredicate<TypePackId>> MagicMatch::handleOldSolver(
     WithPredicate<TypePackId> withPredicate
 )
 {
-    auto [paramPack, _predicates] = withPredicate;
+    auto [paramPack, _predicates] = std::move(withPredicate);
     const auto& [params, tail] = flatten(paramPack);
 
     if (params.size() < 2 || params.size() > 3)
@@ -892,7 +943,7 @@ std::optional<WithPredicate<TypePackId>> MagicMatch::handleOldSolver(
     if (params.size() == 3 && expr.args.size > initIndex)
         typechecker.unify(params[2], optionalNumber, scope, expr.args.data[initIndex]->location);
 
-    const TypePackId returnList = arena.addTypePack(returnTypes);
+    const TypePackId returnList = arena.addTypePack(std::move(returnTypes));
     return WithPredicate<TypePackId>{returnList};
 }
 
@@ -926,7 +977,7 @@ bool MagicMatch::infer(const MagicFunctionCallContext& context)
     if (params.size() == 3 && context.callSite->args.size > initIndex)
         context.solver->unify(context.constraint, params[2], optionalNumber);
 
-    const TypePackId returnList = arena->addTypePack(returnTypes);
+    const TypePackId returnList = arena->addTypePack(std::move(returnTypes));
     asMutable(context.result)->ty.emplace<BoundTypePack>(returnList);
 
     return true;
@@ -939,7 +990,7 @@ std::optional<WithPredicate<TypePackId>> MagicFind::handleOldSolver(
     WithPredicate<TypePackId> withPredicate
 )
 {
-    auto [paramPack, _predicates] = withPredicate;
+    auto [paramPack, _predicates] = std::move(withPredicate);
     const auto& [params, tail] = flatten(paramPack);
 
     if (params.size() < 2 || params.size() > 4)
@@ -986,7 +1037,7 @@ std::optional<WithPredicate<TypePackId>> MagicFind::handleOldSolver(
 
     returnTypes.insert(returnTypes.begin(), {optionalNumber, optionalNumber});
 
-    const TypePackId returnList = arena.addTypePack(returnTypes);
+    const TypePackId returnList = arena.addTypePack(std::move(returnTypes));
     return WithPredicate<TypePackId>{returnList};
 }
 
@@ -1039,12 +1090,12 @@ bool MagicFind::infer(const MagicFunctionCallContext& context)
 
     returnTypes.insert(returnTypes.begin(), {optionalNumber, optionalNumber});
 
-    const TypePackId returnList = arena->addTypePack(returnTypes);
+    const TypePackId returnList = arena->addTypePack(std::move(returnTypes));
     asMutable(context.result)->ty.emplace<BoundTypePack>(returnList);
     return true;
 }
 
-TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes)
+TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes, SolverMode mode)
 {
     NotNull<TypeArena> arena{builtinTypes->arena.get()};
 
@@ -1060,7 +1111,9 @@ TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes)
     const TypePackId oneStringPack = arena->addTypePack({stringType});
     const TypePackId anyTypePack = builtinTypes->anyTypePack;
 
-    const TypePackId variadicTailPack = FFlag::LuauSolverV2 ? builtinTypes->unknownTypePack : anyTypePack;
+    const TypePackId variadicTailPack = (FFlag::LuauUseWorkspacePropToChooseSolver && mode == SolverMode::New) ? builtinTypes->unknownTypePack
+                                        : FFlag::LuauSolverV2                                                  ? builtinTypes->unknownTypePack
+                                                                                                               : anyTypePack;
     const TypePackId emptyPack = arena->addTypePack({});
     const TypePackId stringVariadicList = arena->addTypePack(TypePackVar{VariadicTypePack{stringType}});
     const TypePackId numberVariadicList = arena->addTypePack(TypePackVar{VariadicTypePack{numberType}});
@@ -1068,7 +1121,7 @@ TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes)
 
     FunctionType formatFTV{arena->addTypePack(TypePack{{stringType}, variadicTailPack}), oneStringPack};
     formatFTV.isCheckedFunction = true;
-    const TypeId formatFn = arena->addType(formatFTV);
+    const TypeId formatFn = arena->addType(std::move(formatFTV));
     attachMagicFunction(formatFn, std::make_shared<MagicFormat>());
 
 
@@ -1089,7 +1142,7 @@ TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes)
         arena->addTypePack({stringType, stringType, optionalNumber}), arena->addTypePack(TypePackVar{VariadicTypePack{stringType}})
     };
     matchFuncTy.isCheckedFunction = true;
-    const TypeId matchFunc = arena->addType(matchFuncTy);
+    const TypeId matchFunc = arena->addType(std::move(matchFuncTy));
     attachMagicFunction(matchFunc, std::make_shared<MagicMatch>());
 
     FunctionType findFuncTy{
@@ -1097,7 +1150,7 @@ TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes)
         arena->addTypePack(TypePack{{optionalNumber, optionalNumber}, stringVariadicList})
     };
     findFuncTy.isCheckedFunction = true;
-    const TypeId findFunc = arena->addType(findFuncTy);
+    const TypeId findFunc = arena->addType(std::move(findFuncTy));
     attachMagicFunction(findFunc, std::make_shared<MagicFind>());
 
     // string.byte : string -> number? -> number? -> ...number
@@ -1116,8 +1169,8 @@ TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes)
     stringDotUnpack.isCheckedFunction = true;
 
     TableType::Props stringLib = {
-        {"byte", {arena->addType(stringDotByte)}},
-        {"char", {arena->addType(stringDotChar)}},
+        {"byte", {arena->addType(std::move(stringDotByte))}},
+        {"char", {arena->addType(std::move(stringDotChar))}},
         {"find", {findFunc}},
         {"format", {formatFn}}, // FIXME
         {"gmatch", {gmatchFunc}},
@@ -1146,7 +1199,7 @@ TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes)
              oneStringPack,
          })}},
         {"packsize", {makeFunction(*arena, stringType, {}, {}, {}, {}, {numberType}, /* checked */ true)}},
-        {"unpack", {arena->addType(stringDotUnpack)}},
+        {"unpack", {arena->addType(std::move(stringDotUnpack))}},
     };
 
     assignPropDocumentationSymbols(stringLib, "@luau/global/string");
@@ -1166,7 +1219,7 @@ std::optional<WithPredicate<TypePackId>> MagicSelect::handleOldSolver(
     WithPredicate<TypePackId> withPredicate
 )
 {
-    auto [paramPack, _predicates] = withPredicate;
+    auto [paramPack, _predicates] = std::move(withPredicate);
 
     (void)scope;
 
@@ -1256,7 +1309,7 @@ std::optional<WithPredicate<TypePackId>> MagicSetMetatable::handleOldSolver(
     WithPredicate<TypePackId> withPredicate
 )
 {
-    auto [paramPack, _predicates] = withPredicate;
+    auto [paramPack, _predicates] = std::move(withPredicate);
 
     if (size(paramPack) < 2 && finite(paramPack))
         return std::nullopt;
@@ -1290,7 +1343,7 @@ std::optional<WithPredicate<TypePackId>> MagicSetMetatable::handleOldSolver(
                     mtv.syntheticName = tableName;
             }
 
-            TypeId mtTy = arena.addType(mtv);
+            TypeId mtTy = arena.addType(std::move(mtv));
 
             if (expr.args.size < 1)
                 return std::nullopt;
@@ -1343,7 +1396,7 @@ std::optional<WithPredicate<TypePackId>> MagicAssert::handleOldSolver(
     WithPredicate<TypePackId> withPredicate
 )
 {
-    auto [paramPack, predicates] = withPredicate;
+    auto [paramPack, predicates] = std::move(withPredicate);
 
     TypeArena& arena = typechecker.currentModule->internalTypes;
 
@@ -1382,7 +1435,7 @@ std::optional<WithPredicate<TypePackId>> MagicPack::handleOldSolver(
     WithPredicate<TypePackId> withPredicate
 )
 {
-    auto [paramPack, _predicates] = withPredicate;
+    auto [paramPack, _predicates] = std::move(withPredicate);
 
     TypeArena& arena = typechecker.currentModule->internalTypes;
 
@@ -1467,7 +1520,7 @@ std::optional<WithPredicate<TypePackId>> MagicClone::handleOldSolver(
 {
     LUAU_ASSERT(FFlag::LuauTableCloneClonesType3);
 
-    auto [paramPack, _predicates] = withPredicate;
+    auto [paramPack, _predicates] = std::move(withPredicate);
 
     TypeArena& arena = typechecker.currentModule->internalTypes;
 
@@ -1484,7 +1537,7 @@ std::optional<WithPredicate<TypePackId>> MagicClone::handleOldSolver(
         return std::nullopt;
 
     CloneState cloneState{typechecker.builtinTypes};
-    TypeId resultType = shallowClone(inputType, arena, cloneState);
+    TypeId resultType = shallowClone(inputType, arena, cloneState, /* clonePersistentTypes */ false);
 
     TypePackId clonedTypePack = arena.addTypePack({resultType});
     return WithPredicate<TypePackId>{clonedTypePack};
@@ -1594,15 +1647,12 @@ bool MagicFreeze::infer(const MagicFunctionCallContext& context)
     std::optional<DefId> resultDef = dfg->getDefOptional(targetExpr);
     std::optional<TypeId> resultTy = resultDef ? scope->lookup(*resultDef) : std::nullopt;
 
-    if (FFlag::LuauMagicFreezeCheckBlocked2)
+    if (resultTy && !get<BlockedType>(follow(resultTy)))
     {
-        if (resultTy && !get<BlockedType>(follow(resultTy)))
-        {
-            // If there's an existing result type, but it's _not_ blocked, then
-            // we aren't type stating this builtin and should fall back to
-            // regular inference.
-            return false;
-        }
+        // If there's an existing result type, but it's _not_ blocked, then
+        // we aren't type stating this builtin and should fall back to
+        // regular inference.
+        return false;
     }
 
     std::optional<TypeId> frozenType = freezeTable(inputType, context);

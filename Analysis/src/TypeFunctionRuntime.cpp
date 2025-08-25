@@ -2,9 +2,16 @@
 
 #include "Luau/TypeFunctionRuntime.h"
 
+#include "Luau/Allocator.h"
+#include "Luau/Lexer.h"
+#include "Luau/BuiltinTypeFunctions.h"
+#include "Luau/BytecodeBuilder.h"
+#include "Luau/ParseResult.h"
+#include "Luau/Compiler.h"
 #include "Luau/DenseHash.h"
 #include "Luau/StringUtils.h"
 #include "Luau/TypeFunction.h"
+#include "Luau/TypeFunctionRuntimeBuilder.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -14,10 +21,136 @@
 #include <vector>
 
 LUAU_DYNAMIC_FASTINT(LuauTypeFunctionSerdeIterationLimit)
-LUAU_FASTFLAGVARIABLE(LuauTypeFunOptional)
 
 namespace Luau
 {
+
+LuauTempThreadPopper::LuauTempThreadPopper(lua_State* L)
+    : L(L)
+{
+}
+
+LuauTempThreadPopper::~LuauTempThreadPopper()
+{
+    lua_pop(L, 1);
+}
+
+static void dummyStateClose(lua_State*) {}
+
+TypeFunctionRuntime::TypeFunctionRuntime(NotNull<InternalErrorReporter> ice, NotNull<TypeCheckLimits> limits)
+    : ice(ice)
+    , limits(limits)
+    , state(nullptr, dummyStateClose)
+{
+}
+
+TypeFunctionRuntime::~TypeFunctionRuntime() {}
+
+std::optional<std::string> TypeFunctionRuntime::registerFunction(AstStatTypeFunction* function)
+{
+    // If evaluation is disabled, we do not generate additional error messages
+    if (!allowEvaluation)
+        return std::nullopt;
+
+    // Do not evaluate type functions with parse errors inside
+    if (function->hasErrors)
+        return std::nullopt;
+
+    prepareState();
+
+    lua_State* global = state.get();
+
+    // Fetch to check if function is already registered
+    lua_pushlightuserdata(global, function);
+    lua_gettable(global, LUA_REGISTRYINDEX);
+
+    if (!lua_isnil(global, -1))
+    {
+        lua_pop(global, 1);
+        return std::nullopt;
+    }
+
+    lua_pop(global, 1);
+
+    AstName name = function->name;
+
+    // Construct ParseResult containing the type function
+    Allocator allocator;
+    AstNameTable names(allocator);
+
+    AstExpr* exprFunction = function->body;
+    AstArray<AstExpr*> exprReturns{&exprFunction, 1};
+    AstStatReturn stmtReturn{Location{}, exprReturns};
+    AstStat* stmtArray[] = {&stmtReturn};
+    AstArray<AstStat*> stmts{stmtArray, 1};
+    AstStatBlock exec{Location{}, stmts};
+    ParseResult parseResult{&exec, 1, {}, {}, {}, CstNodeMap{nullptr}};
+
+    BytecodeBuilder builder;
+    try
+    {
+        compileOrThrow(builder, parseResult, names);
+    }
+    catch (CompileError& e)
+    {
+        return format("'%s' type function failed to compile with error message: %s", name.value, e.what());
+    }
+
+    std::string bytecode = builder.getBytecode();
+
+    // Separate sandboxed thread for individual execution and private globals
+    lua_State* L = lua_newthread(global);
+    LuauTempThreadPopper popper(global);
+
+    // Create individual environment for the type function
+    luaL_sandboxthread(L);
+
+    // Do not allow global writes to that environment
+    lua_pushvalue(L, LUA_GLOBALSINDEX);
+    lua_setreadonly(L, -1, true);
+    lua_pop(L, 1);
+
+    // Load bytecode into Luau state
+    if (auto error = checkResultForError(L, name.value, luau_load(L, name.value, bytecode.data(), bytecode.size(), 0)))
+        return error;
+
+    // Execute the global function which should return our user-defined type function
+    if (auto error = checkResultForError(L, name.value, lua_resume(L, nullptr, 0)))
+        return error;
+
+    if (!lua_isfunction(L, -1))
+    {
+        lua_pop(L, 1);
+        return format("Could not find '%s' type function in the global scope", name.value);
+    }
+
+    // Store resulting function in the registry
+    lua_pushlightuserdata(global, function);
+    lua_xmove(L, global, 1);
+    lua_settable(global, LUA_REGISTRYINDEX);
+
+    return std::nullopt;
+}
+
+void TypeFunctionRuntime::prepareState()
+{
+    if (state)
+        return;
+
+    state = StateRef(lua_newstate(typeFunctionAlloc, nullptr), lua_close);
+    lua_State* L = state.get();
+
+    lua_setthreaddata(L, this);
+
+    setTypeFunctionEnvironment(L);
+
+    registerTypeUserData(L);
+
+    registerTypesLibrary(L);
+
+    luaL_sandbox(L);
+    luaL_sandboxthread(L);
+}
 
 constexpr int kTypeUserdataTag = 42;
 
@@ -63,7 +196,7 @@ std::optional<std::string> checkResultForError(lua_State* L, const char* typeFun
     }
 }
 
-static TypeFunctionRuntime* getTypeFunctionRuntime(lua_State* L)
+TypeFunctionRuntime* getTypeFunctionRuntime(lua_State* L)
 {
     return static_cast<TypeFunctionRuntime*>(lua_getthreaddata(lua_mainthread(L)));
 }
@@ -321,8 +454,6 @@ static int getSingletonValue(lua_State* L)
 // Otherwise, makes a union of the two things.
 static int createOptional(lua_State* L)
 {
-    LUAU_ASSERT(FFlag::LuauTypeFunOptional);
-
     int argumentCount = lua_gettop(L);
     if (argumentCount != 1)
         luaL_error(L, "types.optional: expected 1 argument, but got %d", argumentCount);
@@ -342,7 +473,7 @@ static int createOptional(lua_State* L)
 
     components.emplace_back(allocateTypeFunctionType(L, TypeFunctionPrimitiveType(TypeFunctionPrimitiveType::NilType)));
 
-    allocTypeUserData(L, TypeFunctionUnionType{components});
+    allocTypeUserData(L, TypeFunctionUnionType{std::move(components)});
 
     return 1;
 }
@@ -362,7 +493,7 @@ static int createUnion(lua_State* L)
     for (int i = 1; i <= argSize; i++)
         components.push_back(getTypeUserData(L, i));
 
-    allocTypeUserData(L, TypeFunctionUnionType{components});
+    allocTypeUserData(L, TypeFunctionUnionType{std::move(components)});
 
     return 1;
 }
@@ -382,7 +513,7 @@ static int createIntersection(lua_State* L)
     for (int i = 1; i <= argSize; i++)
         components.push_back(getTypeUserData(L, i));
 
-    allocTypeUserData(L, TypeFunctionIntersectionType{components});
+    allocTypeUserData(L, TypeFunctionIntersectionType{std::move(components)});
 
     return 1;
 }
@@ -542,7 +673,7 @@ static int createTable(lua_State* L)
     if (metatable && !get<TypeFunctionTableType>(*metatable))
         luaL_error(L, "types.newtable: expected to be given a table type as a metatable, but got %s instead", getTag(L, *metatable).c_str());
 
-    allocTypeUserData(L, TypeFunctionTableType{props, indexer, metatable});
+    allocTypeUserData(L, TypeFunctionTableType{std::move(props), indexer, metatable});
     return 1;
 }
 
@@ -904,7 +1035,7 @@ static TypeFunctionTypePackId getTypePack(lua_State* L, int headIdx, int tailIdx
     if (head.size() == 0 && tail.has_value())
         result = *tail;
     else
-        result = allocateTypeFunctionTypePack(L, TypeFunctionTypePack{head, tail});
+        result = allocateTypeFunctionTypePack(L, TypeFunctionTypePack{std::move(head), tail});
 
     return result;
 }
@@ -1529,12 +1660,12 @@ void registerTypesLibrary(lua_State* L)
         {"negationof", createNegation},
         {"unionof", createUnion},
         {"intersectionof", createIntersection},
+        {"optional", createOptional},
         {"newtable", createTable},
         {"newfunction", createFunction},
         {"copy", deepCopy},
         {"generic", createGeneric},
 
-        {(FFlag::LuauTypeFunOptional) ? "optional" : nullptr, (FFlag::LuauTypeFunOptional) ? createOptional : nullptr},
         {nullptr, nullptr}
     };
 
@@ -2108,13 +2239,6 @@ bool TypeFunctionProperty::isWriteOnly() const
  * Below is a helper class for type.copy()
  * Forked version of Clone.cpp
  */
-using TypeFunctionKind = Variant<TypeFunctionTypeId, TypeFunctionTypePackId>;
-
-template<typename T>
-const T* get(const TypeFunctionKind& kind)
-{
-    return get_if<T>(&kind);
-}
 
 class TypeFunctionCloner
 {

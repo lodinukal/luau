@@ -12,10 +12,16 @@ namespace Luau
 ExternTypeFixture::ExternTypeFixture(bool prepareAutocomplete)
     : BuiltinsFixture(prepareAutocomplete)
 {
-    GlobalTypes& globals = frontend.globals;
+}
+
+Frontend& ExternTypeFixture::getFrontend()
+{
+    Frontend& f = BuiltinsFixture::getFrontend();
+
+    GlobalTypes& globals = f.globals;
     TypeArena& arena = globals.globalTypes;
-    TypeId numberType = builtinTypes->numberType;
-    TypeId stringType = builtinTypes->stringType;
+    TypeId numberType = getBuiltins()->numberType;
+    TypeId stringType = getBuiltins()->stringType;
 
     unfreeze(arena);
 
@@ -107,7 +113,7 @@ ExternTypeFixture::ExternTypeFixture(bool prepareAutocomplete)
         {"__mul",
          {arena.addType(IntersectionType{{
              makeFunction(arena, vector2InstanceType, {vector2InstanceType}, {vector2InstanceType}),
-             makeFunction(arena, vector2InstanceType, {builtinTypes->numberType}, {vector2InstanceType}),
+             makeFunction(arena, vector2InstanceType, {getBuiltins()->numberType}, {vector2InstanceType}),
          }})}}
     };
     globals.globalScope->exportedTypeBindings["Vector2"] = TypeFun{{}, vector2InstanceType};
@@ -146,6 +152,7 @@ ExternTypeFixture::ExternTypeFixture(bool prepareAutocomplete)
         persist(tf.type);
 
     freeze(arena);
+    return *frontend;
 }
 
 } // namespace Luau

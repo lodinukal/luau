@@ -2,21 +2,40 @@
 #include "Luau/Ast.h"
 
 #include "Luau/Common.h"
+#include "Luau/StringUtils.h"
 
-LUAU_FASTFLAG(LuauStoreReturnTypesAsPackOnAst)
+LUAU_FASTFLAG(LuauParametrizedAttributeSyntax)
 
 namespace Luau
 {
 
-static bool hasAttributeInArray(const AstArray<AstAttr*> attributes, AstAttr::Type attributeType)
+static AstAttr* findAttributeInArray(const AstArray<AstAttr*> attributes, AstAttr::Type attributeType)
 {
     for (const auto attribute : attributes)
     {
         if (attribute->type == attributeType)
-            return true;
+            return attribute;
     }
 
-    return false;
+    return nullptr;
+}
+
+static bool hasAttributeInArray(const AstArray<AstAttr*> attributes, AstAttr::Type attributeType)
+{
+    if (FFlag::LuauParametrizedAttributeSyntax)
+    {
+        return findAttributeInArray(attributes, attributeType) != nullptr;
+    }
+    else
+    {
+        for (const auto attribute : attributes)
+        {
+            if (attribute->type == attributeType)
+                return true;
+        }
+
+        return false;
+    }
 }
 
 static void visitTypeList(AstVisitor* visitor, const AstTypeList& list)
@@ -28,15 +47,39 @@ static void visitTypeList(AstVisitor* visitor, const AstTypeList& list)
         list.tailType->visit(visitor);
 }
 
-AstAttr::AstAttr(const Location& location, Type type)
+AstAttr::AstAttr(const Location& location, Type type, AstArray<AstExpr*> args)
     : AstNode(ClassIndex(), location)
     , type(type)
+    , args(args)
 {
 }
 
 void AstAttr::visit(AstVisitor* visitor)
 {
     visitor->visit(this);
+}
+
+AstAttr::DeprecatedInfo AstAttr::deprecatedInfo() const
+{
+    AstAttr::DeprecatedInfo info;
+    info.deprecated = type == AstAttr::Type::Deprecated;
+
+    if (info.deprecated && args.size > 0)
+    {
+        AstExprTable* table = args.data[0]->as<AstExprTable>();
+        if (auto useValue = table->getRecord("use"))
+        {
+            AstArray<char> use = (*useValue)->as<AstExprConstantString>()->value;
+            info.use = {{use.data, use.size}};
+        }
+        if (auto reasonValue = table->getRecord("reason"))
+        {
+            AstArray<char> reason = (*reasonValue)->as<AstExprConstantString>()->value;
+            info.reason = {{reason.data, reason.size}};
+        }
+    }
+
+    return info;
 }
 
 int gAstRttiIndex = 0;
@@ -258,41 +301,6 @@ AstExprFunction::AstExprFunction(
     , debugname(debugname)
     , argLocation(argLocation)
 {
-    LUAU_ASSERT(FFlag::LuauStoreReturnTypesAsPackOnAst);
-}
-
-AstExprFunction::AstExprFunction(
-    const Location& location,
-    const AstArray<AstAttr*>& attributes,
-    const AstArray<AstGenericType*>& generics,
-    const AstArray<AstGenericTypePack*>& genericPacks,
-    AstLocal* self,
-    const AstArray<AstLocal*>& args,
-    bool vararg,
-    const Location& varargLocation,
-    AstStatBlock* body,
-    size_t functionDepth,
-    const AstName& debugname,
-    const std::optional<AstTypeList>& returnAnnotation,
-    AstTypePack* varargAnnotation,
-    const std::optional<Location>& argLocation
-)
-    : AstExpr(ClassIndex(), location)
-    , attributes(attributes)
-    , generics(generics)
-    , genericPacks(genericPacks)
-    , self(self)
-    , args(args)
-    , returnAnnotation_DEPRECATED(returnAnnotation)
-    , vararg(vararg)
-    , varargLocation(varargLocation)
-    , varargAnnotation(varargAnnotation)
-    , body(body)
-    , functionDepth(functionDepth)
-    , debugname(debugname)
-    , argLocation(argLocation)
-{
-    LUAU_ASSERT(!FFlag::LuauStoreReturnTypesAsPackOnAst);
 }
 
 void AstExprFunction::visit(AstVisitor* visitor)
@@ -308,16 +316,8 @@ void AstExprFunction::visit(AstVisitor* visitor)
         if (varargAnnotation)
             varargAnnotation->visit(visitor);
 
-        if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-        {
-            if (returnAnnotation)
-                returnAnnotation->visit(visitor);
-        }
-        else
-        {
-            if (returnAnnotation_DEPRECATED)
-                visitTypeList(visitor, *returnAnnotation_DEPRECATED);
-        }
+        if (returnAnnotation)
+            returnAnnotation->visit(visitor);
 
         body->visit(visitor);
     }
@@ -338,6 +338,11 @@ bool AstExprFunction::hasAttribute(const AstAttr::Type attributeType) const
     return hasAttributeInArray(attributes, attributeType);
 }
 
+AstAttr* AstExprFunction::getAttribute(const AstAttr::Type attributeType) const
+{
+    return findAttributeInArray(attributes, attributeType);
+}
+
 AstExprTable::AstExprTable(const Location& location, const AstArray<Item>& items)
     : AstExpr(ClassIndex(), location)
     , items(items)
@@ -356,6 +361,19 @@ void AstExprTable::visit(AstVisitor* visitor)
             item.value->visit(visitor);
         }
     }
+}
+
+std::optional<AstExpr*> AstExprTable::getRecord(const char* key) const
+{
+    for (const AstExprTable::Item& item : items)
+    {
+        if (item.kind == AstExprTable::Item::Kind::Record)
+        {
+            if (strcmp(item.key->as<AstExprConstantString>()->value.data, key) == 0)
+                return item.value;
+        }
+    }
+    return {};
 }
 
 AstExprUnary::AstExprUnary(const Location& location, Op op, AstExpr* expr)
@@ -908,7 +926,6 @@ AstStatDeclareFunction::AstStatDeclareFunction(
     , varargLocation(varargLocation)
     , retTypes(retTypes)
 {
-    LUAU_ASSERT(FFlag::LuauStoreReturnTypesAsPackOnAst);
 }
 
 AstStatDeclareFunction::AstStatDeclareFunction(
@@ -936,64 +953,6 @@ AstStatDeclareFunction::AstStatDeclareFunction(
     , varargLocation(varargLocation)
     , retTypes(retTypes)
 {
-    LUAU_ASSERT(FFlag::LuauStoreReturnTypesAsPackOnAst);
-}
-
-// Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-AstStatDeclareFunction::AstStatDeclareFunction(
-    const Location& location,
-    const AstName& name,
-    const Location& nameLocation,
-    const AstArray<AstGenericType*>& generics,
-    const AstArray<AstGenericTypePack*>& genericPacks,
-    const AstTypeList& params,
-    const AstArray<AstArgumentName>& paramNames,
-    bool vararg,
-    const Location& varargLocation,
-    const AstTypeList& retTypes
-)
-    : AstStat(ClassIndex(), location)
-    , attributes()
-    , name(name)
-    , nameLocation(nameLocation)
-    , generics(generics)
-    , genericPacks(genericPacks)
-    , params(params)
-    , paramNames(paramNames)
-    , vararg(vararg)
-    , varargLocation(varargLocation)
-    , retTypes_DEPRECATED(retTypes)
-{
-    LUAU_ASSERT(!FFlag::LuauStoreReturnTypesAsPackOnAst);
-}
-
-// Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-AstStatDeclareFunction::AstStatDeclareFunction(
-    const Location& location,
-    const AstArray<AstAttr*>& attributes,
-    const AstName& name,
-    const Location& nameLocation,
-    const AstArray<AstGenericType*>& generics,
-    const AstArray<AstGenericTypePack*>& genericPacks,
-    const AstTypeList& params,
-    const AstArray<AstArgumentName>& paramNames,
-    bool vararg,
-    const Location& varargLocation,
-    const AstTypeList& retTypes
-)
-    : AstStat(ClassIndex(), location)
-    , attributes(attributes)
-    , name(name)
-    , nameLocation(nameLocation)
-    , generics(generics)
-    , genericPacks(genericPacks)
-    , params(params)
-    , paramNames(paramNames)
-    , vararg(vararg)
-    , varargLocation(varargLocation)
-    , retTypes_DEPRECATED(retTypes)
-{
-    LUAU_ASSERT(!FFlag::LuauStoreReturnTypesAsPackOnAst);
 }
 
 void AstStatDeclareFunction::visit(AstVisitor* visitor)
@@ -1001,10 +960,7 @@ void AstStatDeclareFunction::visit(AstVisitor* visitor)
     if (visitor->visit(this))
     {
         visitTypeList(visitor, params);
-        if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-            retTypes->visit(visitor);
-        else
-            visitTypeList(visitor, retTypes_DEPRECATED);
+        retTypes->visit(visitor);
     }
 }
 
@@ -1022,6 +978,11 @@ bool AstStatDeclareFunction::isCheckedFunction() const
 bool AstStatDeclareFunction::hasAttribute(AstAttr::Type attributeType) const
 {
     return hasAttributeInArray(attributes, attributeType);
+}
+
+AstAttr* AstStatDeclareFunction::getAttribute(const AstAttr::Type attributeType) const
+{
+    return findAttributeInArray(attributes, attributeType);
 }
 
 AstStatDeclareExternType::AstStatDeclareExternType(
@@ -1144,7 +1105,6 @@ AstTypeFunction::AstTypeFunction(
     , argNames(argNames)
     , returnTypes(returnTypes)
 {
-    LUAU_ASSERT(FFlag::LuauStoreReturnTypesAsPackOnAst);
     LUAU_ASSERT(argNames.size == 0 || argNames.size == argTypes.types.size);
 }
 
@@ -1165,50 +1125,6 @@ AstTypeFunction::AstTypeFunction(
     , argNames(argNames)
     , returnTypes(returnTypes)
 {
-    LUAU_ASSERT(FFlag::LuauStoreReturnTypesAsPackOnAst);
-    LUAU_ASSERT(argNames.size == 0 || argNames.size == argTypes.types.size);
-}
-
-// Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-AstTypeFunction::AstTypeFunction(
-    const Location& location,
-    const AstArray<AstGenericType*>& generics,
-    const AstArray<AstGenericTypePack*>& genericPacks,
-    const AstTypeList& argTypes,
-    const AstArray<std::optional<AstArgumentName>>& argNames,
-    const AstTypeList& returnTypes
-)
-    : AstType(ClassIndex(), location)
-    , attributes()
-    , generics(generics)
-    , genericPacks(genericPacks)
-    , argTypes(argTypes)
-    , argNames(argNames)
-    , returnTypes_DEPRECATED(returnTypes)
-{
-    LUAU_ASSERT(!FFlag::LuauStoreReturnTypesAsPackOnAst);
-    LUAU_ASSERT(argNames.size == 0 || argNames.size == argTypes.types.size);
-}
-
-// Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-AstTypeFunction::AstTypeFunction(
-    const Location& location,
-    const AstArray<AstAttr*>& attributes,
-    const AstArray<AstGenericType*>& generics,
-    const AstArray<AstGenericTypePack*>& genericPacks,
-    const AstTypeList& argTypes,
-    const AstArray<std::optional<AstArgumentName>>& argNames,
-    const AstTypeList& returnTypes
-)
-    : AstType(ClassIndex(), location)
-    , attributes(attributes)
-    , generics(generics)
-    , genericPacks(genericPacks)
-    , argTypes(argTypes)
-    , argNames(argNames)
-    , returnTypes_DEPRECATED(returnTypes)
-{
-    LUAU_ASSERT(!FFlag::LuauStoreReturnTypesAsPackOnAst);
     LUAU_ASSERT(argNames.size == 0 || argNames.size == argTypes.types.size);
 }
 
@@ -1217,10 +1133,7 @@ void AstTypeFunction::visit(AstVisitor* visitor)
     if (visitor->visit(this))
     {
         visitTypeList(visitor, argTypes);
-        if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-            returnTypes->visit(visitor);
-        else
-            visitTypeList(visitor, returnTypes_DEPRECATED);
+        returnTypes->visit(visitor);
     }
 }
 
@@ -1238,6 +1151,11 @@ bool AstTypeFunction::isCheckedFunction() const
 bool AstTypeFunction::hasAttribute(AstAttr::Type attributeType) const
 {
     return hasAttributeInArray(attributes, attributeType);
+}
+
+AstAttr* AstTypeFunction::getAttribute(AstAttr::Type attributeType) const
+{
+    return findAttributeInArray(attributes, attributeType);
 }
 
 AstTypeTypeof::AstTypeTypeof(const Location& location, AstExpr* expr)
@@ -1387,6 +1305,34 @@ void AstTypePackGeneric::visit(AstVisitor* visitor)
 bool isLValue(const AstExpr* expr)
 {
     return expr->is<AstExprLocal>() || expr->is<AstExprGlobal>() || expr->is<AstExprIndexName>() || expr->is<AstExprIndexExpr>();
+}
+
+bool isConstantLiteral(const AstExpr* expr)
+{
+    return expr->is<AstExprConstantNil>() || expr->is<AstExprConstantBool>() || expr->is<AstExprConstantNumber>() ||
+           expr->is<AstExprConstantString>();
+}
+
+bool isLiteralTable(const AstExpr* expr)
+{
+    if (!expr->is<AstExprTable>())
+        return false;
+
+    for (const AstExprTable::Item& item : expr->as<AstExprTable>()->items)
+    {
+        switch (item.kind)
+        {
+        case AstExprTable::Item::Kind::General:
+            return false;
+            break;
+        case AstExprTable::Item::Kind::Record:
+        case AstExprTable::Item::Kind::List:
+            if (!isConstantLiteral(item.value) && !isLiteralTable(item.value))
+                return false;
+            break;
+        }
+    }
+    return true;
 }
 
 AstName getIdentifier(AstExpr* node)

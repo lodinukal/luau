@@ -8,9 +8,8 @@
 #include "doctest.h"
 
 LUAU_FASTFLAG(LuauSolverV2);
-LUAU_FASTFLAG(LintRedundantNativeAttribute);
-LUAU_FASTFLAG(LuauDeprecatedAttribute);
-LUAU_FASTFLAG(LuauNonReentrantGeneralization3);
+LUAU_FASTFLAG(LuauEagerGeneralization4);
+LUAU_FASTFLAG(LuauParametrizedAttributeSyntax)
 
 using namespace Luau;
 
@@ -51,7 +50,7 @@ TEST_CASE_FIXTURE(Fixture, "UnknownGlobal")
 TEST_CASE_FIXTURE(Fixture, "DeprecatedGlobal")
 {
     // Normally this would be defined externally, so hack it in for testing
-    addGlobalBinding(frontend.globals, "Wait", Binding{builtinTypes->anyType, {}, true, "wait", "@test/global/Wait"});
+    addGlobalBinding(getFrontend().globals, "Wait", Binding{getBuiltins()->anyType, {}, true, "wait", "@test/global/Wait"});
 
     LintResult result = lint("Wait(5)");
 
@@ -63,7 +62,7 @@ TEST_CASE_FIXTURE(Fixture, "DeprecatedGlobalNoReplacement")
 {
     // Normally this would be defined externally, so hack it in for testing
     const char* deprecationReplacementString = "";
-    addGlobalBinding(frontend.globals, "Version", Binding{builtinTypes->anyType, {}, true, deprecationReplacementString});
+    addGlobalBinding(getFrontend().globals, "Version", Binding{getBuiltins()->anyType, {}, true, deprecationReplacementString});
 
     LintResult result = lint("Version()");
 
@@ -390,7 +389,7 @@ return bar()
 TEST_CASE_FIXTURE(Fixture, "ImportUnused")
 {
     // Normally this would be defined externally, so hack it in for testing
-    addGlobalBinding(frontend.globals, "game", builtinTypes->anyType, "@test");
+    addGlobalBinding(getFrontend().globals, "game", getBuiltins()->anyType, "@test");
 
     LintResult result = lint(R"(
 local Roact = require(game.Packages.Roact)
@@ -621,16 +620,16 @@ return foo1
 
 TEST_CASE_FIXTURE(Fixture, "UnknownType")
 {
-    unfreeze(frontend.globals.globalTypes);
+    unfreeze(getFrontend().globals.globalTypes);
     TableType::Props instanceProps{
-        {"ClassName", {builtinTypes->anyType}},
+        {"ClassName", {getBuiltins()->anyType}},
     };
 
-    TableType instanceTable{instanceProps, std::nullopt, frontend.globals.globalScope->level, Luau::TableState::Sealed};
-    TypeId instanceType = frontend.globals.globalTypes.addType(instanceTable);
+    TableType instanceTable{instanceProps, std::nullopt, getFrontend().globals.globalScope->level, Luau::TableState::Sealed};
+    TypeId instanceType = getFrontend().globals.globalTypes.addType(instanceTable);
     TypeFun instanceTypeFun{{}, instanceType};
 
-    frontend.globals.globalScope->exportedTypeBindings["Part"] = instanceTypeFun;
+    getFrontend().globals.globalScope->exportedTypeBindings["Part"] = instanceTypeFun;
 
     LintResult result = lint(R"(
 local game = ...
@@ -1341,10 +1340,10 @@ TEST_CASE_FIXTURE(Fixture, "no_spurious_warning_after_a_function_type_alias")
 
 TEST_CASE_FIXTURE(Fixture, "use_all_parent_scopes_for_globals")
 {
-    ScopePtr testScope = frontend.addEnvironment("Test");
-    unfreeze(frontend.globals.globalTypes);
-    frontend.loadDefinitionFile(
-        frontend.globals,
+    ScopePtr testScope = getFrontend().addEnvironment("Test");
+    unfreeze(getFrontend().globals.globalTypes);
+    getFrontend().loadDefinitionFile(
+        getFrontend().globals,
         testScope,
         R"(
         declare Foo: number
@@ -1352,7 +1351,7 @@ TEST_CASE_FIXTURE(Fixture, "use_all_parent_scopes_for_globals")
         "@test",
         /* captureComments */ false
     );
-    freeze(frontend.globals.globalTypes);
+    freeze(getFrontend().globals.globalTypes);
 
     fileResolver.environments["A"] = "Test";
 
@@ -1521,32 +1520,32 @@ TEST_CASE_FIXTURE(Fixture, "LintHygieneUAF")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "DeprecatedApiTyped")
 {
-    unfreeze(frontend.globals.globalTypes);
-    TypeId instanceType = frontend.globals.globalTypes.addType(ExternType{"Instance", {}, std::nullopt, std::nullopt, {}, {}, "Test", {}});
+    unfreeze(getFrontend().globals.globalTypes);
+    TypeId instanceType = getFrontend().globals.globalTypes.addType(ExternType{"Instance", {}, std::nullopt, std::nullopt, {}, {}, "Test", {}});
     persist(instanceType);
-    frontend.globals.globalScope->exportedTypeBindings["Instance"] = TypeFun{{}, instanceType};
+    getFrontend().globals.globalScope->exportedTypeBindings["Instance"] = TypeFun{{}, instanceType};
 
     getMutable<ExternType>(instanceType)->props = {
-        {"Name", {builtinTypes->stringType}},
-        {"DataCost", {builtinTypes->numberType, /* deprecated= */ true}},
-        {"Wait", {builtinTypes->anyType, /* deprecated= */ true}},
+        {"Name", {getBuiltins()->stringType}},
+        {"DataCost", {getBuiltins()->numberType, /* deprecated= */ true}},
+        {"Wait", {getBuiltins()->anyType, /* deprecated= */ true}},
     };
 
     TypeId colorType =
-        frontend.globals.globalTypes.addType(TableType{{}, std::nullopt, frontend.globals.globalScope->level, Luau::TableState::Sealed});
+        getFrontend().globals.globalTypes.addType(TableType{{}, std::nullopt, getFrontend().globals.globalScope->level, Luau::TableState::Sealed});
 
-    getMutable<TableType>(colorType)->props = {{"toHSV", {builtinTypes->anyType, /* deprecated= */ true, "Color3:ToHSV"}}};
+    getMutable<TableType>(colorType)->props = {{"toHSV", {getBuiltins()->anyType, /* deprecated= */ true, "Color3:ToHSV"}}};
 
-    addGlobalBinding(frontend.globals, "Color3", Binding{colorType, {}});
+    addGlobalBinding(getFrontend().globals, "Color3", Binding{colorType, {}});
 
-    if (TableType* ttv = getMutable<TableType>(getGlobalBinding(frontend.globals, "table")))
+    if (TableType* ttv = getMutable<TableType>(getGlobalBinding(getFrontend().globals, "table")))
     {
         ttv->props["foreach"].deprecated = true;
         ttv->props["getn"].deprecated = true;
         ttv->props["getn"].deprecatedSuggestion = "#";
     }
 
-    freeze(frontend.globals.globalTypes);
+    freeze(getFrontend().globals.globalTypes);
 
     LintResult result = lint(R"(
 return function (i: Instance)
@@ -1571,7 +1570,7 @@ end
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "DeprecatedApiUntyped")
 {
-    if (TableType* ttv = getMutable<TableType>(getGlobalBinding(frontend.globals, "table")))
+    if (TableType* ttv = getMutable<TableType>(getGlobalBinding(getFrontend().globals, "table")))
     {
         ttv->props["foreach"].deprecated = true;
         ttv->props["getn"].deprecated = true;
@@ -1875,6 +1874,191 @@ end
     }
 }
 
+TEST_CASE_FIXTURE(Fixture, "DeprecatedAttributeWithParams")
+{
+    ScopedFastFlag sff{FFlag::LuauParametrizedAttributeSyntax, true};
+
+    // @deprecated works on local functions
+    {
+        LintResult result = lint(R"(
+@[deprecated{ use = "prodfun", reason = "Too old." }]
+local function testfun(x)
+    return x + 1
+end
+
+testfun(1)
+)");
+
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(
+            result.warnings[0], Position(6, 0), Position(6, 7), "Function 'testfun' is deprecated, use 'prodfun' instead. Too old."
+        );
+    }
+
+    // @deprecated works on globals functions
+    {
+        LintResult result = lint(R"(
+@[deprecated{ use = "prodfun", reason = "Too old." }]
+function testfun(x)
+    return x + 1
+end
+
+testfun(1)
+)");
+
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(
+            result.warnings[0], Position(6, 0), Position(6, 7), "Function 'testfun' is deprecated, use 'prodfun' instead. Too old."
+        );
+    }
+
+    // @deprecated with only 'use' works on local functions
+    {
+        LintResult result = lint(R"(
+@[deprecated{ use = "prodfun" }]
+local function testfun(x)
+    return x + 1
+end
+
+testfun(1)
+)");
+
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(result.warnings[0], Position(6, 0), Position(6, 7), "Function 'testfun' is deprecated, use 'prodfun' instead");
+    }
+
+    // @deprecated with only 'use' works on globals functions
+    {
+        LintResult result = lint(R"(
+@[deprecated{ use = "prodfun" }]
+function testfun(x)
+    return x + 1
+end
+
+testfun(1)
+)");
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(result.warnings[0], Position(6, 0), Position(6, 7), "Function 'testfun' is deprecated, use 'prodfun' instead");
+    }
+
+
+    // @deprecated with only 'reason' works on local functions
+    {
+        LintResult result = lint(R"(
+@[deprecated{ reason = "Too old." }]
+local function testfun(x)
+    return x + 1
+end
+
+testfun(1)
+)");
+
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(result.warnings[0], Position(6, 0), Position(6, 7), "Function 'testfun' is deprecated. Too old.");
+    }
+
+    // @deprecated with only 'reason' works on globals functions
+    {
+        LintResult result = lint(R"(
+@[deprecated{ reason = "Too old." }]
+function testfun(x)
+    return x + 1
+end
+
+testfun(1)
+)");
+
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(result.warnings[0], Position(6, 0), Position(6, 7), "Function 'testfun' is deprecated. Too old.");
+    }
+
+    // @deprecated works for methods with a literal class name
+    {
+        LintResult result = lint(R"(
+Account = { balance=0 }
+
+@[deprecated{use = 'credit', reason = 'It sounds cool'}]
+function Account:deposit(v)
+    self.balance = self.balance + v
+end
+
+Account:deposit(200.00)
+)");
+
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(result.warnings[0], Position(8, 0), Position(8, 15), "Member 'Account.deposit' is deprecated, use 'credit' instead. It sounds cool");
+    }
+
+    // @deprecated works for methods with a compound expression class name
+    {
+        LintResult result = lint(R"(
+Account = { balance=0 }
+
+function getAccount()
+    return Account
+end
+
+@[deprecated{use = 'credit', reason = 'It sounds cool'}]
+function Account:deposit (v)
+    self.balance = self.balance + v
+end
+
+(getAccount()):deposit(200.00)
+)");
+
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(result.warnings[0], Position(12, 0), Position(12, 22), "Member 'deposit' is deprecated, use 'credit' instead. It sounds cool");
+    }
+
+    {
+        loadDefinition(R"(
+@[deprecated{use = 'foo', reason = 'Do better.'}] declare function bar(x: number): string
+)");
+
+        LintResult result = lint(R"(
+bar(2)
+)");
+
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(result.warnings[0], Position(1, 0), Position(1, 3), "Function 'bar' is deprecated, use 'foo' instead. Do better.");
+    }
+
+    {
+        loadDefinition(R"(
+declare Hooty : {
+    tooty : @[deprecated{use = 'foo', reason = 'bar'}] @checked (number) -> number
+}
+)");
+        LintResult result = lint(R"(
+print(Hooty:tooty(2.0))
+)");
+
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(result.warnings[0], Position(1, 6), Position(1, 17), "Member 'Hooty.tooty' is deprecated, use 'foo' instead. bar");
+    }
+
+    {
+        loadDefinition(R"(
+declare class Foo
+   @[deprecated{use = 'foo', reason = 'baz'}]
+   function bar(self, value: number) : number
+end
+
+declare Foo: {
+   new: () -> Foo
+}
+)");
+
+        LintResult result = lint(R"(
+local foo = Foo.new()
+print(foo:bar(2.0))
+)");
+
+        REQUIRE(1 == result.warnings.size());
+        checkDeprecatedWarning(result.warnings[0], Position(2, 6), Position(2, 13), "Member 'bar' is deprecated, use 'foo' instead. baz");
+    }
+}
+
 TEST_CASE_FIXTURE(Fixture, "DeprecatedAttributeFunctionDeclaration")
 {
     ScopedFastFlag _{FFlag::LuauSolverV2, true};
@@ -1941,9 +2125,6 @@ print(foo:bar(2.0))
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "TableOperations")
 {
-    // FIXME: For now this flag causes a stack overflow on Windows.
-    ScopedFastFlag _{FFlag::LuauNonReentrantGeneralization3, false};
-
     LintResult result = lint(R"(
 local t = {}
 local tt = {}
@@ -2340,8 +2521,6 @@ local _ = a <= (b == 0)
 
 TEST_CASE_FIXTURE(Fixture, "RedundantNativeAttribute")
 {
-    ScopedFastFlag sff[] = {{FFlag::LintRedundantNativeAttribute, true}};
-
     LintResult result = lint(R"(
 --!native
 

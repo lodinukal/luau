@@ -16,6 +16,8 @@
 #include "lstate.h"
 #include "lgc.h"
 
+LUAU_FASTFLAG(LuauCodeGenDirectBtest)
+
 namespace Luau
 {
 namespace CodeGen
@@ -759,6 +761,34 @@ void IrLoweringX64::lowerInst(IrInst& inst, uint32_t index, const IrBlock& next)
         build.setLabel(exit);
         break;
     }
+    case IrCmd::CMP_INT:
+    {
+        CODEGEN_ASSERT(FFlag::LuauCodeGenDirectBtest);
+
+        // Cannot reuse operand registers as a target because we have to modify it before the comparison
+        inst.regX64 = regs.allocReg(SizeX64::dword, index);
+
+        // We are going to operate on byte register, those do not clear high bits on write
+        build.xor_(inst.regX64, inst.regX64);
+
+        IrCondition cond = conditionOp(inst.c);
+
+        if (inst.a.kind == IrOpKind::Constant)
+        {
+            build.cmp(regOp(inst.b), intOp(inst.a));
+            build.setcc(getInverseCondition(getConditionInt(cond)), byteReg(inst.regX64));
+        }
+        else if (inst.a.kind == IrOpKind::Inst)
+        {
+            build.cmp(regOp(inst.a), intOp(inst.b));
+            build.setcc(getConditionInt(cond), byteReg(inst.regX64));
+        }
+        else
+        {
+            CODEGEN_ASSERT(!"Unsupported instruction form");
+        }
+        break;
+    }
     case IrCmd::CMP_ANY:
     {
         IrCondition cond = conditionOp(inst.c);
@@ -1217,6 +1247,40 @@ void IrLoweringX64::lowerInst(IrInst& inst, uint32_t index, const IrBlock& next)
         callWrap.call(qword[rNativeContext + offsetof(NativeContext, luaV_getimport)]);
 
         emitUpdateBase(build);
+        break;
+    }
+    case IrCmd::GET_CACHED_IMPORT:
+    {
+        regs.assertAllFree();
+        regs.assertNoSpills();
+
+        Label skip, exit;
+
+        // If the constant for the import is set, we will use it directly, otherwise we have to call an import path lookup function
+        build.cmp(luauConstantTag(vmConstOp(inst.b)), LUA_TNIL);
+        build.jcc(ConditionX64::NotEqual, skip);
+
+        {
+            ScopedSpills spillGuard(regs);
+
+            IrCallWrapperX64 callWrap(regs, build, index);
+            callWrap.addArgument(SizeX64::qword, rState);
+            callWrap.addArgument(SizeX64::qword, luauRegAddress(vmRegOp(inst.a)));
+            callWrap.addArgument(SizeX64::dword, importOp(inst.c));
+            callWrap.addArgument(SizeX64::dword, uintOp(inst.d));
+            callWrap.call(qword[rNativeContext + offsetof(NativeContext, getImport)]);
+        }
+
+        emitUpdateBase(build);
+        build.jmp(exit);
+
+        build.setLabel(skip);
+
+        ScopedRegX64 tmp1{regs, SizeX64::xmmword};
+
+        build.vmovups(tmp1.reg, luauConstant(vmConstOp(inst.b)));
+        build.vmovups(luauReg(vmRegOp(inst.a)), tmp1.reg);
+        build.setLabel(exit);
         break;
     }
     case IrCmd::CONCAT:
@@ -2212,7 +2276,7 @@ void IrLoweringX64::jumpOrAbortOnUndef(ConditionX64 cond, IrOp target, const IrB
         }
         else
         {
-            build.jcc(getReverseCondition(cond), label);
+            build.jcc(getNegatedCondition(cond), label);
             build.ud2();
             build.setLabel(label);
         }
@@ -2348,6 +2412,11 @@ int IrLoweringX64::intOp(IrOp op) const
 unsigned IrLoweringX64::uintOp(IrOp op) const
 {
     return function.uintOp(op);
+}
+
+unsigned IrLoweringX64::importOp(IrOp op) const
+{
+    return function.importOp(op);
 }
 
 double IrLoweringX64::doubleOp(IrOp op) const

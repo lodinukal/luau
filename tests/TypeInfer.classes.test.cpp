@@ -15,6 +15,7 @@ using namespace Luau;
 using std::nullopt;
 
 LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTFLAG(LuauScopeMethodsAreSolverAgnostic)
 
 TEST_SUITE_BEGIN("TypeInferExternTypes");
 
@@ -129,8 +130,6 @@ TEST_CASE_FIXTURE(ExternTypeFixture, "we_can_infer_that_a_parameter_must_be_a_pa
 
 TEST_CASE_FIXTURE(ExternTypeFixture, "we_can_report_when_someone_is_trying_to_use_a_table_rather_than_a_class")
 {
-    DOES_NOT_PASS_NEW_SOLVER_GUARD();
-
     CheckResult result = check(R"(
         function makeClone(o)
             return BaseClass.Clone(o)
@@ -457,7 +456,10 @@ b(a)
 
     if (FFlag::LuauSolverV2)
     {
-        CHECK("Type 'number' could not be converted into 'string'" == toString(result.errors.at(0)));
+        const std::string expected = "Type 'Vector2' could not be converted into '{ read X: unknown, read Y: string }'; \n"
+                                     "this is because accessing `Y` results in `number` in the former type and `string` in the latter type, "
+                                     "and `number` is not a subtype of `string`";
+        CHECK_EQ(expected, toString(result.errors.at(0)));
     }
     else
     {
@@ -472,9 +474,6 @@ Type 'number' could not be converted into 'string')";
 
 TEST_CASE_FIXTURE(ExternTypeFixture, "class_type_mismatch_with_name_conflict")
 {
-    // CLI-116433
-    DOES_NOT_PASS_NEW_SOLVER_GUARD();
-
     CheckResult result = check(R"(
 local i = ChildClass.New()
 type ChildClass = { x: number }
@@ -771,7 +770,7 @@ TEST_CASE_FIXTURE(Fixture, "read_write_class_properties")
 {
     ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
-    TypeArena& arena = frontend.globals.globalTypes;
+    TypeArena& arena = getFrontend().globals.globalTypes;
 
     unfreeze(arena);
 
@@ -787,7 +786,7 @@ TEST_CASE_FIXTURE(Fixture, "read_write_class_properties")
 
     TypeId partType = arena.addType(ExternType{
         "Part",
-        {{"BrickColor", Property::rw(builtinTypes->stringType)}, {"Parent", Property::rw(workspaceType, instanceType)}},
+        {{"BrickColor", Property::rw(getBuiltins()->stringType)}, {"Parent", Property::rw(workspaceType, instanceType)}},
         instanceType,
         nullopt,
         {},
@@ -798,7 +797,7 @@ TEST_CASE_FIXTURE(Fixture, "read_write_class_properties")
 
     getMutable<ExternType>(workspaceType)->props = {{"Script", Property::readonly(scriptType)}, {"Part", Property::readonly(partType)}};
 
-    frontend.globals.globalScope->bindings[frontend.globals.globalNames.names->getOrAdd("script")] = Binding{scriptType};
+    getFrontend().globals.globalScope->bindings[getFrontend().globals.globalNames.names->getOrAdd("script")] = Binding{scriptType};
 
     freeze(arena);
 
@@ -812,8 +811,8 @@ TEST_CASE_FIXTURE(Fixture, "read_write_class_properties")
     CHECK(Location{{1, 40}, {1, 48}} == result.errors[0].location);
     TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
     REQUIRE(tm);
-    CHECK(builtinTypes->stringType == tm->wantedType);
-    CHECK(builtinTypes->numberType == tm->givenType);
+    CHECK(getBuiltins()->stringType == tm->wantedType);
+    CHECK(getBuiltins()->numberType == tm->givenType);
 }
 
 TEST_CASE_FIXTURE(ExternTypeFixture, "cannot_index_a_class_with_no_indexer")
@@ -827,10 +826,11 @@ TEST_CASE_FIXTURE(ExternTypeFixture, "cannot_index_a_class_with_no_indexer")
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
     CHECK_MESSAGE(
-        get<DynamicPropertyLookupOnExternTypesUnsafe>(result.errors[0]), "Expected DynamicPropertyLookupOnExternTypesUnsafe but got " << result.errors[0]
+        get<DynamicPropertyLookupOnExternTypesUnsafe>(result.errors[0]),
+        "Expected DynamicPropertyLookupOnExternTypesUnsafe but got " << result.errors[0]
     );
 
-    CHECK(builtinTypes->errorType == requireType("c"));
+    CHECK(getBuiltins()->errorType == requireType("c"));
 }
 
 TEST_CASE_FIXTURE(ExternTypeFixture, "cyclic_tables_are_assumed_to_be_compatible_with_extern_types")
@@ -890,6 +890,30 @@ TEST_CASE_FIXTURE(ExternTypeFixture, "cyclic_tables_are_assumed_to_be_compatible
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(ExternTypeFixture, "ice_while_checking_script_due_to_scopes_not_being_solver_agnostic")
+{
+    // This is intentional - if LuauSolverV2 is false, but we elect the new solver, we should still follow
+    // new solver code paths.
+    // This is necessary to repro an ice that can occur in studio
+    ScopedFastFlag luauSolverOff{FFlag::LuauSolverV2, false};
+    getFrontend().setLuauSolverMode(SolverMode::New);
+    ScopedFastFlag sff{FFlag::LuauScopeMethodsAreSolverAgnostic, true};
+
+    auto result = check(R"(
+local function ExitSeat(player, character, seat, weld)
+    --Find vehicle model
+    local model
+    local newParent = seat
+    repeat
+        model = newParent
+        newParent = model.Parent
+    until newParent.ClassName ~= "Model"
+    local part, _ = Raycast(seat.Position, dir, dist, {character, model})
+end
+)");
+    LUAU_REQUIRE_ERRORS(result);
 }
 
 TEST_SUITE_END();

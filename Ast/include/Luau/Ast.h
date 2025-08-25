@@ -197,7 +197,14 @@ public:
         Deprecated,
     };
 
-    AstAttr(const Location& location, Type type);
+    struct DeprecatedInfo
+    {
+        bool deprecated = false;
+        std::optional<std::string> use;
+        std::optional<std::string> reason;
+    };
+
+    AstAttr(const Location& location, Type type, AstArray<AstExpr*> args);
 
     AstAttr* asAttr() override
     {
@@ -206,7 +213,10 @@ public:
 
     void visit(AstVisitor* visitor) override;
 
+    DeprecatedInfo deprecatedInfo() const;
+
     Type type;
+    AstArray<AstExpr*> args;
 };
 
 class AstExpr : public AstNode
@@ -329,9 +339,28 @@ public:
 
     enum QuoteStyle
     {
+        // A string created using double quotes or an interpolated string,
+        // as in:
+        //
+        //  "foo", `My name is {protagonist}! / And I'm {antagonist}!`
+        //
         QuotedSimple,
+        // A string created using single quotes, as in:
+        //
+        //  'bar'
+        //
+        QuotedSingle,
+        // A string created using `[[ ... ]]` as in:
+        //
+        //   [[ Gee, this sure is a long string.
+        //   it even has a new line in it! ]]
+        //
         QuotedRaw,
-        Unquoted
+        // A "string" in the context of a table literal, as in:
+        //
+        //  { foo = 42 } -- `foo` here is a "constant string"
+        //
+        Unquoted,
     };
 
     AstExprConstantString(const Location& location, const AstArray<char>& value, QuoteStyle quoteStyle);
@@ -451,36 +480,17 @@ public:
         const std::optional<Location>& argLocation = std::nullopt
     );
 
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-    AstExprFunction(
-        const Location& location,
-        const AstArray<AstAttr*>& attributes,
-        const AstArray<AstGenericType*>& generics,
-        const AstArray<AstGenericTypePack*>& genericPacks,
-        AstLocal* self,
-        const AstArray<AstLocal*>& args,
-        bool vararg,
-        const Location& varargLocation,
-        AstStatBlock* body,
-        size_t functionDepth,
-        const AstName& debugname,
-        const std::optional<AstTypeList>& returnAnnotation,
-        AstTypePack* varargAnnotation = nullptr,
-        const std::optional<Location>& argLocation = std::nullopt
-    );
-
     void visit(AstVisitor* visitor) override;
 
     bool hasNativeAttribute() const;
     bool hasAttribute(AstAttr::Type attributeType) const;
+    AstAttr* getAttribute(AstAttr::Type attributeType) const;
 
     AstArray<AstAttr*> attributes;
     AstArray<AstGenericType*> generics;
     AstArray<AstGenericTypePack*> genericPacks;
     AstLocal* self;
     AstArray<AstLocal*> args;
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-    std::optional<AstTypeList> returnAnnotation_DEPRECATED;
     AstTypePack* returnAnnotation = nullptr;
     bool vararg = false;
     Location varargLocation;
@@ -518,6 +528,8 @@ public:
     AstExprTable(const Location& location, const AstArray<Item>& items);
 
     void visit(AstVisitor* visitor) override;
+
+    std::optional<AstExpr*> getRecord(const char* key) const;
 
     AstArray<Item> items;
 };
@@ -949,7 +961,6 @@ class AstStatDeclareFunction : public AstStat
 public:
     LUAU_RTTI(AstStatDeclareFunction)
 
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
     AstStatDeclareFunction(
         const Location& location,
         const AstName& name,
@@ -963,7 +974,6 @@ public:
         AstTypePack* retTypes
     );
 
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
     AstStatDeclareFunction(
         const Location& location,
         const AstArray<AstAttr*>& attributes,
@@ -977,41 +987,12 @@ public:
         const Location& varargLocation,
         AstTypePack* retTypes
     );
-
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-    AstStatDeclareFunction(
-        const Location& location,
-        const AstName& name,
-        const Location& nameLocation,
-        const AstArray<AstGenericType*>& generics,
-        const AstArray<AstGenericTypePack*>& genericPacks,
-        const AstTypeList& params,
-        const AstArray<AstArgumentName>& paramNames,
-        bool vararg,
-        const Location& varargLocation,
-        const AstTypeList& retTypes
-    );
-
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-    AstStatDeclareFunction(
-        const Location& location,
-        const AstArray<AstAttr*>& attributes,
-        const AstName& name,
-        const Location& nameLocation,
-        const AstArray<AstGenericType*>& generics,
-        const AstArray<AstGenericTypePack*>& genericPacks,
-        const AstTypeList& params,
-        const AstArray<AstArgumentName>& paramNames,
-        bool vararg,
-        const Location& varargLocation,
-        const AstTypeList& retTypes
-    );
-
 
     void visit(AstVisitor* visitor) override;
 
     bool isCheckedFunction() const;
     bool hasAttribute(AstAttr::Type attributeType) const;
+    AstAttr* getAttribute(AstAttr::Type attributeType) const;
 
     AstArray<AstAttr*> attributes;
     AstName name;
@@ -1023,8 +1004,6 @@ public:
     bool vararg = false;
     Location varargLocation;
     AstTypePack* retTypes;
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-    AstTypeList retTypes_DEPRECATED;
 };
 
 struct AstDeclaredExternTypeProperty
@@ -1167,39 +1146,17 @@ public:
         AstTypePack* returnTypes
     );
 
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-    AstTypeFunction(
-        const Location& location,
-        const AstArray<AstGenericType*>& generics,
-        const AstArray<AstGenericTypePack*>& genericPacks,
-        const AstTypeList& argTypes,
-        const AstArray<std::optional<AstArgumentName>>& argNames,
-        const AstTypeList& returnTypes
-    );
-
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-    AstTypeFunction(
-        const Location& location,
-        const AstArray<AstAttr*>& attributes,
-        const AstArray<AstGenericType*>& generics,
-        const AstArray<AstGenericTypePack*>& genericPacks,
-        const AstTypeList& argTypes,
-        const AstArray<std::optional<AstArgumentName>>& argNames,
-        const AstTypeList& returnTypes
-    );
-
     void visit(AstVisitor* visitor) override;
 
     bool isCheckedFunction() const;
     bool hasAttribute(AstAttr::Type attributeType) const;
+    AstAttr* getAttribute(AstAttr::Type attributeType) const;
 
     AstArray<AstAttr*> attributes;
     AstArray<AstGenericType*> generics;
     AstArray<AstGenericTypePack*> genericPacks;
     AstTypeList argTypes;
     AstArray<std::optional<AstArgumentName>> argNames;
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-    AstTypeList returnTypes_DEPRECATED;
     AstTypePack* returnTypes;
 };
 
@@ -1638,6 +1595,8 @@ public:
 };
 
 bool isLValue(const AstExpr*);
+bool isConstantLiteral(const AstExpr*);
+bool isLiteralTable(const AstExpr*);
 AstName getIdentifier(AstExpr*);
 Location getLocation(const AstTypeList& typeList);
 

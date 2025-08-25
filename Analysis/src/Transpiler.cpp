@@ -10,9 +10,6 @@
 #include <limits>
 #include <math.h>
 
-LUAU_FASTFLAG(LuauStoreReturnTypesAsPackOnAst)
-LUAU_FASTFLAG(LuauStoreLocalAnnotationColonPositions)
-
 namespace
 {
 bool isIdentifierStartChar(char c)
@@ -323,8 +320,7 @@ struct Printer
         writer.identifier(local.name.value);
         if (writeTypes && local.annotation)
         {
-            if (FFlag::LuauStoreLocalAnnotationColonPositions)
-                advance(colonPosition);
+            advance(colonPosition);
             writer.symbol(":");
             visualizeTypeAnnotation(*local.annotation);
         }
@@ -352,7 +348,11 @@ struct Printer
             LUAU_ASSERT(!forVarArg);
             if (const auto cstNode = lookupCstNode<CstTypePackExplicit>(explicitTp))
                 visualizeTypeList(
-                    explicitTp->typeList, FFlag::LuauStoreReturnTypesAsPackOnAst ? cstNode->hasParentheses : true, cstNode->openParenthesesPosition, cstNode->closeParenthesesPosition, cstNode->commaPositions
+                    explicitTp->typeList,
+                    cstNode->hasParentheses,
+                    cstNode->openParenthesesPosition,
+                    cstNode->closeParenthesesPosition,
+                    cstNode->commaPositions
                 );
             else
                 visualizeTypeList(explicitTp->typeList, unconditionallyParenthesize);
@@ -925,7 +925,7 @@ struct Printer
             for (size_t i = 0; i < a->vars.size; i++)
             {
                 varComma();
-                if (FFlag::LuauStoreLocalAnnotationColonPositions && cstNode)
+                if (cstNode)
                 {
                     LUAU_ASSERT(cstNode->varsAnnotationColonPositions.size > i);
                     visualize(*a->vars.data[i], cstNode->varsAnnotationColonPositions.data[i]);
@@ -954,10 +954,7 @@ struct Printer
 
             writer.keyword("for");
 
-            if (FFlag::LuauStoreLocalAnnotationColonPositions)
-                visualize(*a->var, cstNode ? cstNode->annotationColonPosition : Position{0, 0});
-            else
-                visualize(*a->var, Position{0,0});
+            visualize(*a->var, cstNode ? cstNode->annotationColonPosition : Position{0, 0});
 
             if (cstNode)
                 advance(cstNode->equalsPosition);
@@ -991,7 +988,7 @@ struct Printer
             for (size_t i = 0; i < a->vars.size; i++)
             {
                 varComma();
-                if (FFlag::LuauStoreLocalAnnotationColonPositions && cstNode)
+                if (cstNode)
                 {
                     LUAU_ASSERT(cstNode->varsAnnotationColonPositions.size > i);
                     visualize(*a->vars.data[i], cstNode->varsAnnotationColonPositions.data[i]);
@@ -1255,6 +1252,15 @@ struct Printer
 
             writer.symbol(")");
         }
+        else if (const auto& a = program.as<AstStatDeclareGlobal>())
+        {
+            writer.keyword("declare");
+            writer.advance(a->nameLocation.begin);
+            writer.identifier(a->name.value);
+
+            writer.symbol(":");
+            visualizeTypeAnnotation(*a->type);
+        }
         else
         {
             LUAU_ASSERT(!"Unknown AstStat");
@@ -1314,7 +1320,7 @@ struct Printer
             writer.identifier(local->name.value);
             if (writeTypes && local->annotation)
             {
-                if (FFlag::LuauStoreReturnTypesAsPackOnAst && FFlag::LuauStoreLocalAnnotationColonPositions && cstNode)
+                if (cstNode)
                 {
                     LUAU_ASSERT(cstNode->argsAnnotationColonPositions.size > i);
                     advance(cstNode->argsAnnotationColonPositions.data[i]);
@@ -1332,7 +1338,7 @@ struct Printer
 
             if (func.varargAnnotation)
             {
-                if (FFlag::LuauStoreReturnTypesAsPackOnAst && FFlag::LuauStoreLocalAnnotationColonPositions && cstNode)
+                if (cstNode)
                 {
                     LUAU_ASSERT(cstNode->varargAnnotationColonPosition != Position({0, 0}));
                     advance(cstNode->varargAnnotationColonPosition);
@@ -1346,23 +1352,15 @@ struct Printer
             advanceBefore(func.argLocation->end, 1);
         writer.symbol(")");
 
-        if (writeTypes && FFlag::LuauStoreReturnTypesAsPackOnAst ? func.returnAnnotation != nullptr : func.returnAnnotation_DEPRECATED.has_value())
+        if (writeTypes && func.returnAnnotation != nullptr)
         {
             if (cstNode)
                 advance(cstNode->returnSpecifierPosition);
             writer.symbol(":");
 
-            if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-            {
-                if (!cstNode)
-                    writer.space();
-                visualizeTypePackAnnotation(*func.returnAnnotation, false, false);
-            }
-            else
-            {
+            if (!cstNode)
                 writer.space();
-                visualizeTypeList(*func.returnAnnotation_DEPRECATED, false);
-            }
+            visualizeTypePackAnnotation(*func.returnAnnotation, false, false);
         }
 
         visualizeBlock(*func.body);
@@ -1545,10 +1543,7 @@ struct Printer
             if (cstNode)
                 advance(cstNode->returnArrowPosition);
             writer.symbol("->");
-            if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-                visualizeTypePackAnnotation(*a->returnTypes, false);
-            else
-                visualizeTypeList(a->returnTypes_DEPRECATED, true);
+            visualizeTypePackAnnotation(*a->returnTypes, false);
         }
         else if (const auto& a = typeAnnotation.as<AstTypeTable>())
         {
@@ -1894,7 +1889,7 @@ TranspileResult transpile(std::string_view source, ParseOptions options, bool wi
 
     auto allocator = Allocator{};
     auto names = AstNameTable{allocator};
-    ParseResult parseResult = Parser::parse(source.data(), source.size(), names, allocator, options);
+    ParseResult parseResult = Parser::parse(source.data(), source.size(), names, allocator, std::move(options));
 
     if (!parseResult.errors.empty())
     {

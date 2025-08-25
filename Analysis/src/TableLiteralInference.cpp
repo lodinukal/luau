@@ -13,21 +13,8 @@
 #include "Luau/TypeUtils.h"
 #include "Luau/Unifier2.h"
 
-LUAU_FASTFLAGVARIABLE(LuauBidirectionalInferenceElideAssert)
-LUAU_FASTFLAG(LuauTableLiteralSubtypeSpecificCheck)
-
 namespace Luau
 {
-
-static bool isRecord(const AstExprTable::Item& item)
-{
-    if (item.kind == AstExprTable::Item::Record)
-        return true;
-    else if (item.kind == AstExprTable::Item::General && item.key->is<AstExprConstantString>())
-        return true;
-    else
-        return false;
-}
 
 TypeId matchLiteralType(
     NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes,
@@ -206,11 +193,10 @@ TypeId matchLiteralType(
 
                 Property& prop = it->second;
 
-                // If we encounter a duplcate property, we may have already
-                // set it to be read-only. If that's the case, the only thing
-                // that will definitely crash is trying to access a write
-                // only property.
-                LUAU_ASSERT(!prop.isWriteOnly());
+                // If the property is write-only, do nothing.
+                if (prop.isWriteOnly())
+                    continue;
+
                 TypeId propTy = *prop.readTy;
 
                 auto it2 = expectedTableTy->props.find(keyStr);
@@ -307,9 +293,6 @@ TypeId matchLiteralType(
             }
             else if (item.kind == AstExprTable::Item::List)
             {
-                if (!FFlag::LuauBidirectionalInferenceElideAssert)
-                    LUAU_ASSERT(tableTy->indexer);
-
                 if (expectedTableTy->indexer)
                 {
                     const TypeId* propTy = astTypes->find(item.value);

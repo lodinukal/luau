@@ -12,6 +12,8 @@
 #include "lstate.h"
 #include "lgc.h"
 
+LUAU_FASTFLAG(LuauCodeGenDirectBtest)
+
 namespace Luau
 {
 namespace CodeGen
@@ -798,6 +800,30 @@ void IrLoweringA64::lowerInst(IrInst& inst, uint32_t index, const IrBlock& next)
         }
         break;
     }
+    case IrCmd::CMP_INT:
+    {
+        CODEGEN_ASSERT(FFlag::LuauCodeGenDirectBtest);
+
+        inst.regA64 = regs.allocReuse(KindA64::w, index, {inst.a, inst.b});
+
+        IrCondition cond = conditionOp(inst.c);
+
+        if (inst.a.kind == IrOpKind::Constant)
+        {
+            build.cmp(regOp(inst.b), intOp(inst.a));
+            build.cset(inst.regA64, getInverseCondition(getConditionInt(cond)));
+        }
+        else if (inst.a.kind == IrOpKind::Inst)
+        {
+            build.cmp(regOp(inst.a), intOp(inst.b));
+            build.cset(inst.regA64, getConditionInt(cond));
+        }
+        else
+        {
+            CODEGEN_ASSERT(!"Unsupported instruction form");
+        }
+        break;
+    }
     case IrCmd::CMP_ANY:
     {
         IrCondition cond = conditionOp(inst.c);
@@ -1382,6 +1408,46 @@ void IrLoweringA64::lowerInst(IrInst& inst, uint32_t index, const IrBlock& next)
 
         emitUpdateBase(build);
         break;
+    case IrCmd::GET_CACHED_IMPORT:
+    {
+        regs.spill(build, index);
+
+        Label skip, exit;
+
+        RegisterA64 tempTag = regs.allocTemp(KindA64::w);
+
+        AddressA64 addrConstTag = tempAddr(inst.b, offsetof(TValue, tt));
+        build.ldr(tempTag, addrConstTag);
+
+        // If the constant for the import is set, we will use it directly, otherwise we have to call an import path lookup function
+        CODEGEN_ASSERT(LUA_TNIL == 0);
+        build.cbnz(tempTag, skip);
+
+        {
+            build.mov(x0, rState);
+            build.add(x1, rBase, uint16_t(vmRegOp(inst.a) * sizeof(TValue)));
+            build.mov(w2, importOp(inst.c));
+            build.mov(w3, uintOp(inst.d));
+            build.ldr(x4, mem(rNativeContext, offsetof(NativeContext, getImport)));
+            build.blr(x4);
+
+            emitUpdateBase(build);
+            build.b(exit);
+        }
+
+        build.setLabel(skip);
+
+        RegisterA64 tempTv = regs.allocTemp(KindA64::q);
+
+        AddressA64 addrConst = tempAddr(inst.b, 0);
+        build.ldr(tempTv, addrConst);
+
+        AddressA64 addrReg = tempAddr(inst.a, 0);
+        build.str(tempTv, addrReg);
+
+        build.setLabel(exit);
+        break;
+    }
     case IrCmd::CONCAT:
         regs.spill(build, index);
         build.mov(x0, rState);
@@ -2718,6 +2784,11 @@ int IrLoweringA64::intOp(IrOp op) const
 unsigned IrLoweringA64::uintOp(IrOp op) const
 {
     return function.uintOp(op);
+}
+
+unsigned IrLoweringA64::importOp(IrOp op) const
+{
+    return function.importOp(op);
 }
 
 double IrLoweringA64::doubleOp(IrOp op) const

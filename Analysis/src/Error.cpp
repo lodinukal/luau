@@ -12,13 +12,15 @@
 #include "Luau/TypeFunction.h"
 
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <unordered_set>
 
 LUAU_FASTINTVARIABLE(LuauIndentTypeMismatchMaxTypeLength, 10)
-LUAU_FASTFLAG(DebugLuauGreedyGeneralization)
+LUAU_FASTFLAG(LuauEagerGeneralization4)
+
+LUAU_FASTFLAG(LuauSolverAgnosticStringification)
+LUAU_FASTFLAGVARIABLE(LuauNewNonStrictReportsOneIndexedErrors)
 
 static std::string wrongNumberOfArgsString(
     size_t expectedCount,
@@ -157,7 +159,7 @@ struct ErrorConverter
         }
 
         if (result.empty())
-            result = constructErrorMessage(givenTypeName, wantedTypeName, std::nullopt, std::nullopt);
+            result = constructErrorMessage(std::move(givenTypeName), std::move(wantedTypeName), std::nullopt, std::nullopt);
 
 
         if (tm.error)
@@ -416,7 +418,19 @@ struct ErrorConverter
 
         auto it = mtt->props.find("__call");
         if (it != mtt->props.end())
-            return it->second.type();
+        {
+            if (FFlag::LuauSolverAgnosticStringification)
+            {
+                return it->second.readTy;
+            }
+            else
+            {
+                if (FFlag::LuauSolverV2)
+                    return it->second.readTy;
+                else
+                    return it->second.type_DEPRECATED();
+            }
+        }
         else
             return std::nullopt;
     }
@@ -445,6 +459,9 @@ struct ErrorConverter
 
             return err;
         }
+
+        if (auto primitiveTy = get<PrimitiveType>(follow(e.ty)); primitiveTy && primitiveTy->type == PrimitiveType::Function)
+            return "The type " + toString(e.ty) + " is not precise enough for us to determine the appropriate result type of this call.";
 
         return "Cannot call a value of type " + toString(e.ty);
     }
@@ -655,7 +672,7 @@ struct ErrorConverter
         }
 
         // binary operators
-        const auto binaryOps = FFlag::DebugLuauGreedyGeneralization ? kBinaryOps : DEPRECATED_kBinaryOps;
+        const auto binaryOps = FFlag::LuauEagerGeneralization4 ? kBinaryOps : DEPRECATED_kBinaryOps;
         if (auto binaryString = binaryOps.find(tfit->function->name); binaryString != binaryOps.end())
         {
             std::string result = "Operator '" + std::string(binaryString->second) + "' could not be applied to operands of types ";
@@ -710,10 +727,10 @@ struct ErrorConverter
                        "'";
         }
 
-        if ((FFlag::DebugLuauGreedyGeneralization ? kUnreachableTypeFunctions : DEPRECATED_kUnreachableTypeFunctions).count(tfit->function->name))
+        if ((FFlag::LuauEagerGeneralization4 ? kUnreachableTypeFunctions : DEPRECATED_kUnreachableTypeFunctions).count(tfit->function->name))
         {
             return "Type function instance " + Luau::toString(e.ty) + " is uninhabited\n" +
-                "This is likely to be a bug, please report it at https://github.com/luau-lang/luau/issues";
+                   "This is likely to be a bug, please report it at https://github.com/luau-lang/luau/issues";
         }
 
         // Everything should be specialized above to report a more descriptive error that hopefully does not mention "type functions" explicitly.
@@ -763,8 +780,12 @@ struct ErrorConverter
     std::string operator()(const CheckedFunctionCallError& e) const
     {
         // TODO: What happens if checkedFunctionName cannot be found??
-        return "Function '" + e.checkedFunctionName + "' expects '" + toString(e.expected) + "' at argument #" + std::to_string(e.argumentIndex) +
-               ", but got '" + Luau::toString(e.passed) + "'";
+        if (FFlag::LuauNewNonStrictReportsOneIndexedErrors)
+            return "Function '" + e.checkedFunctionName + "' expects '" + toString(e.expected) + "' at argument #" +
+                   std::to_string(e.argumentIndex + 1) + ", but got '" + Luau::toString(e.passed) + "'";
+        else
+            return "Function '" + e.checkedFunctionName + "' expects '" + toString(e.expected) + "' at argument #" + std::to_string(e.argumentIndex) +
+                   ", but got '" + Luau::toString(e.passed) + "'";
     }
 
     std::string operator()(const NonStrictFunctionDefinitionError& e) const
@@ -844,6 +865,56 @@ struct ErrorConverter
     {
         return "Unexpected array-like table item: the indexer key type of this table is not `number`.";
     }
+
+    std::string operator()(const CannotCheckDynamicStringFormatCalls& e) const
+    {
+        return "We cannot statically check the type of `string.format` when called with a format string that is not statically known.\n"
+               "If you'd like to use an unchecked `string.format` call, you can cast the format string to `any` using `:: any`.";
+    }
+
+
+    std::string operator()(const GenericTypeCountMismatch& e) const
+    {
+        return "Different number of generic type parameters: subtype had " + std::to_string(e.subTyGenericCount) + ", supertype had " +
+               std::to_string(e.superTyGenericCount) + ".";
+    }
+
+    std::string operator()(const GenericTypePackCountMismatch& e) const
+    {
+        return "Different number of generic type pack parameters: subtype had " + std::to_string(e.subTyGenericPackCount) + ", supertype had " +
+               std::to_string(e.superTyGenericPackCount) + ".";
+    }
+
+    std::string operator()(const MultipleNonviableOverloads& e) const
+    {
+        return "None of the overloads for function that accept " + std::to_string(e.attemptedArgCount) + " arguments are compatible.";
+    }
+
+    std::string operator()(const RecursiveRestraintViolation& e) const
+    {
+        return "Recursive type being used with different parameters.";
+    }
+
+    std::string operator()(const GenericBoundsMismatch& e) const
+    {
+        std::string lowerBounds;
+        for (size_t i = 0; i < e.lowerBounds.size(); ++i)
+        {
+            if (i > 0)
+                lowerBounds += ", ";
+            lowerBounds += Luau::toString(e.lowerBounds[i]);
+        }
+        std::string upperBounds;
+        for (size_t i = 0; i < e.upperBounds.size(); ++i)
+        {
+            if (i > 0)
+                upperBounds += ", ";
+            upperBounds += Luau::toString(e.upperBounds[i]);
+        }
+
+        return "The generic type parameter " + std::string{e.genericName} + "was found to have invalid bounds. Its lower bounds were [" +
+               lowerBounds + "], and its upper bounds were [" + upperBounds + "].";
+    }
 };
 
 struct InvalidNameChecker
@@ -879,14 +950,14 @@ TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType)
 TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason)
     : wantedType(wantedType)
     , givenType(givenType)
-    , reason(reason)
+    , reason(std::move(reason))
 {
 }
 
 TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, std::optional<TypeError> error)
     : wantedType(wantedType)
     , givenType(givenType)
-    , reason(reason)
+    , reason(std::move(reason))
     , error(error ? std::make_shared<TypeError>(std::move(*error)) : nullptr)
 {
 }
@@ -902,7 +973,7 @@ TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType, std::string reas
     : wantedType(wantedType)
     , givenType(givenType)
     , context(context)
-    , reason(reason)
+    , reason(std::move(reason))
 {
 }
 
@@ -910,7 +981,7 @@ TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType, std::string reas
     : wantedType(wantedType)
     , givenType(givenType)
     , context(context)
-    , reason(reason)
+    , reason(std::move(reason))
     , error(error ? std::make_shared<TypeError>(std::move(*error)) : nullptr)
 {
 }
@@ -1232,6 +1303,33 @@ bool CannotAssignToNever::operator==(const CannotAssignToNever& rhs) const
     return *rhsType == *rhs.rhsType && reason == rhs.reason;
 }
 
+bool GenericTypeCountMismatch::operator==(const GenericTypeCountMismatch& rhs) const
+{
+    return subTyGenericCount == rhs.subTyGenericCount && superTyGenericCount == rhs.superTyGenericCount;
+}
+
+bool GenericTypePackCountMismatch::operator==(const GenericTypePackCountMismatch& rhs) const
+{
+    return subTyGenericPackCount == rhs.subTyGenericPackCount && superTyGenericPackCount == rhs.superTyGenericPackCount;
+}
+
+bool MultipleNonviableOverloads::operator==(const MultipleNonviableOverloads& rhs) const
+{
+    return attemptedArgCount == rhs.attemptedArgCount;
+}
+
+GenericBoundsMismatch::GenericBoundsMismatch(const std::string_view genericName, TypeIds lowerBoundSet, TypeIds upperBoundSet)
+    : genericName(genericName)
+    , lowerBounds(lowerBoundSet.take())
+    , upperBounds(upperBoundSet.take())
+{
+}
+
+bool GenericBoundsMismatch::operator==(const GenericBoundsMismatch& rhs) const
+{
+    return genericName == rhs.genericName && lowerBounds == rhs.lowerBounds && upperBounds == rhs.upperBounds;
+}
+
 std::string toString(const TypeError& error)
 {
     return toString(error, TypeErrorToStringOptions{});
@@ -1442,6 +1540,28 @@ void copyError(T& e, TypeArena& destArena, CloneState& cloneState)
     }
     else if constexpr (std::is_same_v<T, ReservedIdentifier>)
     {
+    }
+    else if constexpr (std::is_same_v<T, CannotCheckDynamicStringFormatCalls>)
+    {
+    }
+    else if constexpr (std::is_same_v<T, GenericTypeCountMismatch>)
+    {
+    }
+    else if constexpr (std::is_same_v<T, GenericTypePackCountMismatch>)
+    {
+    }
+    else if constexpr (std::is_same_v<T, MultipleNonviableOverloads>)
+    {
+    }
+    else if constexpr (std::is_same_v<T, RecursiveRestraintViolation>)
+    {
+    }
+    else if constexpr (std::is_same_v<T, GenericBoundsMismatch>)
+    {
+        for (auto& lowerBound : e.lowerBounds)
+            lowerBound = clone(lowerBound);
+        for (auto& upperBound : e.upperBounds)
+            upperBound = clone(upperBound);
     }
     else
         static_assert(always_false_v<T>, "Non-exhaustive type switch");

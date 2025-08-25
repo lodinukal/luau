@@ -34,9 +34,16 @@ using ScopePtr = std::shared_ptr<Scope>;
 struct Module;
 
 struct TypeFunction;
+struct TypeFun;
 struct Constraint;
 struct Subtyping;
 struct TypeChecker2;
+
+enum struct SolverMode
+{
+    Old,
+    New
+};
 
 /**
  * There are three kinds of type variables:
@@ -384,6 +391,7 @@ struct FunctionType
     bool hasNoFreeOrGenericTypes = false;
     bool isCheckedFunction = false;
     bool isDeprecatedFunction = false;
+    std::shared_ptr<AstAttr::DeprecatedInfo> deprecatedInfo;
 };
 
 enum class TableState
@@ -455,9 +463,8 @@ struct Property
         std::optional<Location> typeLocation = std::nullopt
     );
 
-    // DEPRECATED: Should only be called in non-RWP! We assert that the `readTy` is not nullopt.
-    // TODO: Kill once we don't have non-RWP.
-    TypeId type() const;
+    // DEPRECATED: This should be removed with `LuauTypeSolverV2` clean up
+    TypeId type_DEPRECATED() const;
     void setType(TypeId ty);
 
     // If this property has a present `writeTy`, set it equal to the `readTy`.
@@ -564,13 +571,13 @@ struct ExternType
         ModuleName definitionModuleName,
         std::optional<Location> definitionLocation
     )
-        : name(name)
-        , props(props)
+        : name(std::move(name))
+        , props(std::move(props))
         , parent(parent)
         , metatable(metatable)
-        , tags(tags)
-        , userData(userData)
-        , definitionModuleName(definitionModuleName)
+        , tags(std::move(tags))
+        , userData(std::move(userData))
+        , definitionModuleName(std::move(definitionModuleName))
         , definitionLocation(definitionLocation)
     {
     }
@@ -586,13 +593,13 @@ struct ExternType
         std::optional<Location> definitionLocation,
         std::optional<TableIndexer> indexer
     )
-        : name(name)
-        , props(props)
+        : name(std::move(name))
+        , props(std::move(props))
         , parent(parent)
         , metatable(metatable)
-        , tags(tags)
-        , userData(userData)
-        , definitionModuleName(definitionModuleName)
+        , tags(std::move(tags))
+        , userData(std::move(userData))
+        , definitionModuleName(std::move(definitionModuleName))
         , definitionLocation(definitionLocation)
         , indexer(indexer)
     {
@@ -608,7 +615,23 @@ struct UserDefinedFunctionData
     // References to AST elements are owned by the Module allocator which also stores this type
     AstStatTypeFunction* definition = nullptr;
 
-    DenseHashMap<Name, std::pair<AstStatTypeFunction*, size_t>> environment{""};
+    DenseHashMap<Name, std::pair<AstStatTypeFunction*, size_t>> environmentFunction{""};
+    DenseHashMap<Name, std::pair<TypeFun*, size_t>> environmentAlias{""};
+};
+
+enum struct TypeFunctionInstanceState
+{
+    // Indicates that further reduction might be possible.
+    Unsolved,
+
+    // Further reduction is not possible because one of the parameters is generic.
+    Solved,
+
+    // Further reduction is not possible because the application is undefined.
+    // This always indicates an error in the code.
+    //
+    // eg add<nil, nil>
+    Stuck,
 };
 
 /**
@@ -628,6 +651,8 @@ struct TypeFunctionInstanceType
     std::optional<AstName> userFuncName; // Name of the user-defined type function; only available for UDTFs
     UserDefinedFunctionData userFuncData;
 
+    TypeFunctionInstanceState state = TypeFunctionInstanceState::Unsolved;
+
     TypeFunctionInstanceType(
         NotNull<const TypeFunction> function,
         std::vector<TypeId> typeArguments,
@@ -636,31 +661,31 @@ struct TypeFunctionInstanceType
         UserDefinedFunctionData userFuncData
     )
         : function(function)
-        , typeArguments(typeArguments)
-        , packArguments(packArguments)
+        , typeArguments(std::move(typeArguments))
+        , packArguments(std::move(packArguments))
         , userFuncName(userFuncName)
-        , userFuncData(userFuncData)
+        , userFuncData(std::move(userFuncData))
     {
     }
 
     TypeFunctionInstanceType(const TypeFunction& function, std::vector<TypeId> typeArguments)
         : function{&function}
-        , typeArguments(typeArguments)
+        , typeArguments(std::move(typeArguments))
         , packArguments{}
     {
     }
 
     TypeFunctionInstanceType(const TypeFunction& function, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments)
         : function{&function}
-        , typeArguments(typeArguments)
-        , packArguments(packArguments)
+        , typeArguments(std::move(typeArguments))
+        , packArguments(std::move(packArguments))
     {
     }
 
     TypeFunctionInstanceType(NotNull<const TypeFunction> function, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments)
         : function{function}
-        , typeArguments(typeArguments)
-        , packArguments(packArguments)
+        , typeArguments(std::move(typeArguments))
+        , packArguments(std::move(packArguments))
     {
     }
 };
@@ -711,7 +736,7 @@ struct LazyType
 {
     LazyType() = default;
     LazyType(std::function<void(LazyType&)> unwrap)
-        : unwrap(unwrap)
+        : unwrap(std::move(unwrap))
     {
     }
 
@@ -798,8 +823,8 @@ struct Type final
     {
     }
 
-    Type(const TypeVariant& ty, bool persistent)
-        : ty(ty)
+    Type(TypeVariant ty, bool persistent)
+        : ty(std::move(ty))
         , persistent(persistent)
     {
     }
@@ -968,10 +993,8 @@ struct BuiltinTypes
 
     TypeId errorRecoveryType(TypeId guess) const;
     TypePackId errorRecoveryTypePack(TypePackId guess) const;
-    TypeId errorRecoveryType() const;
-    TypePackId errorRecoveryTypePack() const;
 
-    friend TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes);
+    friend TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes, SolverMode mode);
     friend struct GlobalTypes;
 
 private:

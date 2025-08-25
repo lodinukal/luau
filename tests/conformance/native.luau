@@ -237,6 +237,17 @@ end
 
 assert(pcall(fuzzfail23) == false)
 
+local function fuzzfail24(...)
+  local _ = l4
+  repeat
+  local function l0()
+  end
+  until (...)[_][_]:n16((_),_,l4,bit32.btest(0,_,_,_) / bit32.btest(0,_,_,_)(_,_,_,0,((_)),_))
+  do end
+end
+
+assert(pcall(fuzzfail24) == false)
+
 local function arraySizeInv1()
   local t = {1, 2, nil, nil, nil, nil, nil, nil, nil, true}
 
@@ -379,7 +390,7 @@ local function vec3compsum(a: vector)
   return a.X + a.Y + a.Z
 end
 
-assert(vec3compsum(vector(1, 2, 4)) == 7.0)
+assert(vec3compsum(vector.create(1, 2, 4)) == 7.0)
 
 local function vec3add(a: vector, b: vector) return a + b end
 local function vec3sub(a: vector, b: vector) return a - b end
@@ -387,17 +398,17 @@ local function vec3mul(a: vector, b: vector) return a * b end
 local function vec3div(a: vector, b: vector) return a / b end
 local function vec3neg(a: vector) return -a end
 
-assert(vec3add(vector(10, 20, 40), vector(1, 0, 2)) == vector(11, 20, 42))
-assert(vec3sub(vector(10, 20, 40), vector(1, 0, 2)) == vector(9, 20, 38))
-assert(vec3mul(vector(10, 20, 40), vector(1, 0, 2)) == vector(10, 0, 80))
-assert(vec3div(vector(10, 20, 40), vector(1, 0, 2)) == vector(10, math.huge, 20))
-assert(vec3neg(vector(10, 20, 40)) == vector(-10, -20, -40))
+assert(vec3add(vector.create(10, 20, 40), vector.create(1, 0, 2)) == vector.create(11, 20, 42))
+assert(vec3sub(vector.create(10, 20, 40), vector.create(1, 0, 2)) == vector.create(9, 20, 38))
+assert(vec3mul(vector.create(10, 20, 40), vector.create(1, 0, 2)) == vector.create(10, 0, 80))
+assert(vec3div(vector.create(10, 20, 40), vector.create(1, 0, 2)) == vector.create(10, math.huge, 20))
+assert(vec3neg(vector.create(10, 20, 40)) == vector.create(-10, -20, -40))
 
 local function vec3mulnum(a: vector, b: number) return a * b end
 local function vec3mulconst(a: vector) return a * 4 end
 
-assert(vec3mulnum(vector(10, 20, 40), 4) == vector(40, 80, 160))
-assert(vec3mulconst(vector(10, 20, 40), 4) == vector(40, 80, 160))
+assert(vec3mulnum(vector.create(10, 20, 40), 4) == vector.create(40, 80, 160))
+assert(vec3mulconst(vector.create(10, 20, 40), 4) == vector.create(40, 80, 160))
 
 local function bufferbounds(zero)
   local b1 = buffer.create(1)
@@ -512,6 +523,23 @@ end
 
 assert(extramath3(2) == "number")
 assert(extramath3("2") == "number")
+
+local function scopedrestorefailurea(format: string, b: buffer): (string, buffer)
+	local H1F, H2F, H3F, H4F = buffer.readu32(b, 0), buffer.readu32(b, 8), buffer.readu32(b, 16), buffer.readu32(b, 24)
+	local H5F, H6F, _, _ = buffer.readu32(b, 32), buffer.readu32(b, 40), buffer.readu32(b, 48), buffer.readu32(b, 56)
+	local H1B, H2B, H3B, H4B = buffer.readu32(b, 4), buffer.readu32(b, 12), buffer.readu32(b, 20), buffer.readu32(b, 28)
+	local H5B, H6B, _, _ = buffer.readu32(b, 36), buffer.readu32(b, 44), buffer.readu32(b, 52), buffer.readu32(b, 60)
+
+	return string.format(format, H1F, H1B, H2F, H2B, H3F, H3B, H4F, H4B, H5F, H5B, H6F, H6B), b
+end
+
+local function scopedrestorefailureb()
+  local data = buffer.create(64)
+  buffer.fill(data, 0, 0x12, 64)
+  assert(scopedrestorefailurea(string.rep("%08x", 12), data) == string.rep("12", 48))
+end
+
+scopedrestorefailureb()
 
 local function slotcachelimit1()
   local tbl = {

@@ -4,6 +4,7 @@
 #include "Luau/Common.h"
 #include "Luau/NotNull.h"
 #include "Luau/Type.h"
+#include "Luau/TypeOrPack.h"
 #include "Luau/TypePack.h"
 #include "Luau/Unifiable.h"
 #include "Luau/VisitType.h"
@@ -12,21 +13,12 @@ LUAU_FASTFLAG(LuauSolverV2)
 
 // For each `Luau::clone` call, we will clone only up to N amount of types _and_ packs, as controlled by this limit.
 LUAU_FASTINTVARIABLE(LuauTypeCloneIterationLimit, 100'000)
-LUAU_FASTFLAGVARIABLE(LuauClonedTableAndFunctionTypesMustHaveScopes)
-LUAU_FASTFLAGVARIABLE(LuauDoNotClonePersistentBindings)
+
 namespace Luau
 {
 
 namespace
 {
-
-using Kind = Variant<TypeId, TypePackId>;
-
-template<typename T>
-const T* get(const Kind& kind)
-{
-    return get_if<T>(&kind);
-}
 
 class TypeCloner
 {
@@ -38,7 +30,7 @@ protected:
     // A queue of kinds where we cloned it, but whose interior types hasn't
     // been updated to point to new clones. Once all of its interior types
     // has been updated, it gets removed from the queue.
-    std::vector<Kind> queue;
+    std::vector<TypeOrPack> queue;
 
     NotNull<SeenTypes> types;
     NotNull<SeenTypePacks> packs;
@@ -75,12 +67,12 @@ public:
 
         if (hasExceededIterationLimit())
         {
-            TypeId error = builtinTypes->errorRecoveryType();
+            TypeId error = builtinTypes->errorType;
             (*types)[ty] = error;
             return error;
         }
 
-        return find(ty).value_or(builtinTypes->errorRecoveryType());
+        return find(ty).value_or(builtinTypes->errorType);
     }
 
     TypePackId clone(TypePackId tp)
@@ -90,12 +82,12 @@ public:
 
         if (hasExceededIterationLimit())
         {
-            TypePackId error = builtinTypes->errorRecoveryTypePack();
+            TypePackId error = builtinTypes->errorTypePack;
             (*packs)[tp] = error;
             return error;
         }
 
-        return find(tp).value_or(builtinTypes->errorRecoveryTypePack());
+        return find(tp).value_or(builtinTypes->errorTypePack);
     }
 
 private:
@@ -116,7 +108,7 @@ private:
             if (hasExceededIterationLimit())
                 break;
 
-            Kind kind = queue.back();
+            TypeOrPack kind = queue.back();
             queue.pop_back();
 
             if (find(kind))
@@ -147,7 +139,7 @@ protected:
         return std::nullopt;
     }
 
-    std::optional<Kind> find(Kind kind) const
+    std::optional<TypeOrPack> find(TypeOrPack kind) const
     {
         if (auto ty = get<TypeId>(kind))
             return find(*ty);
@@ -210,37 +202,22 @@ public:
 private:
     Property shallowClone(const Property& p)
     {
-        if (FFlag::LuauSolverV2)
-        {
-            std::optional<TypeId> cloneReadTy;
-            if (auto ty = p.readTy)
-                cloneReadTy = shallowClone(*ty);
+        std::optional<TypeId> cloneReadTy;
+        if (auto ty = p.readTy)
+            cloneReadTy = shallowClone(*ty);
 
-            std::optional<TypeId> cloneWriteTy;
-            if (auto ty = p.writeTy)
-                cloneWriteTy = shallowClone(*ty);
+        std::optional<TypeId> cloneWriteTy;
+        if (auto ty = p.writeTy)
+            cloneWriteTy = shallowClone(*ty);
 
-            Property cloned = Property::create(cloneReadTy, cloneWriteTy);
-            cloned.deprecated = p.deprecated;
-            cloned.deprecatedSuggestion = p.deprecatedSuggestion;
-            cloned.location = p.location;
-            cloned.tags = p.tags;
-            cloned.documentationSymbol = p.documentationSymbol;
-            cloned.typeLocation = p.typeLocation;
-            return cloned;
-        }
-        else
-        {
-            return Property{
-                shallowClone(p.type()),
-                p.deprecated,
-                p.deprecatedSuggestion,
-                p.location,
-                p.tags,
-                p.documentationSymbol,
-                p.typeLocation,
-            };
-        }
+        Property cloned = Property::create(cloneReadTy, cloneWriteTy);
+        cloned.deprecated = p.deprecated;
+        cloned.deprecatedSuggestion = p.deprecatedSuggestion;
+        cloned.location = p.location;
+        cloned.tags = p.tags;
+        cloned.documentationSymbol = p.documentationSymbol;
+        cloned.typeLocation = p.typeLocation;
+        return cloned;
     }
 
     void cloneChildren(TypeId ty)
@@ -265,7 +242,7 @@ private:
         );
     }
 
-    void cloneChildren(Kind kind)
+    void cloneChildren(TypeOrPack kind)
     {
         if (auto ty = get<TypeId>(kind))
             return cloneChildren(*ty);
@@ -514,10 +491,7 @@ public:
             free->scope = replacementForNullScope;
         }
         else if (auto tt = getMutable<TableType>(target))
-        {
-            if (FFlag::LuauClonedTableAndFunctionTypesMustHaveScopes)
-                tt->scope = replacementForNullScope;
-        }
+            tt->scope = replacementForNullScope;
 
         (*types)[ty] = target;
         queue.emplace_back(target);
@@ -554,9 +528,9 @@ public:
 
 } // namespace
 
-TypePackId shallowClone(TypePackId tp, TypeArena& dest, CloneState& cloneState, bool ignorePersistent)
+TypePackId shallowClone(TypePackId tp, TypeArena& dest, CloneState& cloneState, bool clonePersistentTypes)
 {
-    if (tp->persistent && !ignorePersistent)
+    if (tp->persistent && !clonePersistentTypes)
         return tp;
 
     TypeCloner cloner{
@@ -565,15 +539,15 @@ TypePackId shallowClone(TypePackId tp, TypeArena& dest, CloneState& cloneState, 
         NotNull{&cloneState.seenTypes},
         NotNull{&cloneState.seenTypePacks},
         nullptr,
-        ignorePersistent ? tp : nullptr
+        clonePersistentTypes ? tp : nullptr
     };
 
     return cloner.shallowClone(tp);
 }
 
-TypeId shallowClone(TypeId typeId, TypeArena& dest, CloneState& cloneState, bool ignorePersistent)
+TypeId shallowClone(TypeId typeId, TypeArena& dest, CloneState& cloneState, bool clonePersistentTypes)
 {
-    if (typeId->persistent && !ignorePersistent)
+    if (typeId->persistent && !clonePersistentTypes)
         return typeId;
 
     TypeCloner cloner{
@@ -581,7 +555,7 @@ TypeId shallowClone(TypeId typeId, TypeArena& dest, CloneState& cloneState, bool
         cloneState.builtinTypes,
         NotNull{&cloneState.seenTypes},
         NotNull{&cloneState.seenTypePacks},
-        ignorePersistent ? typeId : nullptr,
+        clonePersistentTypes ? typeId : nullptr,
         nullptr
     };
 
@@ -733,7 +707,7 @@ Binding cloneIncremental(const Binding& binding, TypeArena& dest, CloneState& cl
     b.deprecatedSuggestion = binding.deprecatedSuggestion;
     b.documentationSymbol = binding.documentationSymbol;
     b.location = binding.location;
-    b.typeId = FFlag::LuauDoNotClonePersistentBindings && binding.typeId->persistent ? binding.typeId : cloner.clone(binding.typeId);
+    b.typeId = binding.typeId->persistent ? binding.typeId : cloner.clone(binding.typeId);
 
     return b;
 }

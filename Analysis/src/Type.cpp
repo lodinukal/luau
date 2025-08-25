@@ -23,11 +23,15 @@
 
 LUAU_FASTFLAG(DebugLuauFreezeArena)
 
+LUAU_FASTFLAG(LuauSolverV2)
+
 LUAU_FASTINTVARIABLE(LuauTypeMaximumStringifierLength, 500)
 LUAU_FASTINTVARIABLE(LuauTableTypeMaximumStringifierLength, 0)
 LUAU_FASTINT(LuauTypeInferRecursionLimit)
 LUAU_FASTFLAG(LuauInstantiateInSubtyping)
-LUAU_FASTFLAGVARIABLE(LuauFreeTypesMustHaveBounds)
+LUAU_FASTFLAG(LuauUseWorkspacePropToChooseSolver)
+LUAU_FASTFLAGVARIABLE(LuauSolverAgnosticVisitType)
+LUAU_FASTFLAGVARIABLE(LuauSolverAgnosticSetType)
 
 namespace Luau
 {
@@ -440,7 +444,7 @@ bool maybeSingleton(TypeId ty)
 
 bool hasLength(TypeId ty, DenseHashSet<TypeId>& seen, int* recursionCount)
 {
-    RecursionLimiter _rl(recursionCount, FInt::LuauTypeInferRecursionLimit);
+    RecursionLimiter _rl("Type::hasLength", recursionCount, FInt::LuauTypeInferRecursionLimit);
 
     ty = follow(ty);
 
@@ -583,8 +587,8 @@ PendingExpansionType::PendingExpansionType(
 )
     : prefix(prefix)
     , name(name)
-    , typeArguments(typeArguments)
-    , packArguments(packArguments)
+    , typeArguments(std::move(typeArguments))
+    , packArguments(std::move(packArguments))
     , index(++nextIndex)
 {
 }
@@ -617,8 +621,8 @@ FunctionType::FunctionType(
     bool hasSelf
 )
     : definition(std::move(defn))
-    , generics(generics)
-    , genericPacks(genericPacks)
+    , generics(std::move(generics))
+    , genericPacks(std::move(genericPacks))
     , argTypes(argTypes)
     , retTypes(retTypes)
     , hasSelf(hasSelf)
@@ -635,8 +639,8 @@ FunctionType::FunctionType(
     bool hasSelf
 )
     : definition(std::move(defn))
-    , generics(generics)
-    , genericPacks(genericPacks)
+    , generics(std::move(generics))
+    , genericPacks(std::move(genericPacks))
     , level(level)
     , argTypes(argTypes)
     , retTypes(retTypes)
@@ -706,7 +710,7 @@ Property Property::create(std::optional<TypeId> read, std::optional<TypeId> writ
     }
 }
 
-TypeId Property::type() const
+TypeId Property::type_DEPRECATED() const
 {
     LUAU_ASSERT(readTy);
     return *readTy;
@@ -715,7 +719,7 @@ TypeId Property::type() const
 void Property::setType(TypeId ty)
 {
     readTy = ty;
-    if (FFlag::LuauSolverV2)
+    if (FFlag::LuauSolverV2 || FFlag::LuauSolverAgnosticSetType)
         writeTy = ty;
 }
 
@@ -832,7 +836,25 @@ bool areEqual(SeenSet& seen, const TableType& lhs, const TableType& rhs)
         if (l->first != r->first)
             return false;
 
-        if (!areEqual(seen, *l->second.type(), *r->second.type()))
+        if (FFlag::LuauSolverV2)
+        {
+            if (l->second.readTy && r->second.readTy)
+            {
+                if (!areEqual(seen, **l->second.readTy, **r->second.readTy))
+                    return false;
+            }
+            else if (l->second.readTy || r->second.readTy)
+                return false;
+
+            if (l->second.writeTy && r->second.writeTy)
+            {
+                if (!areEqual(seen, **l->second.writeTy, **r->second.writeTy))
+                    return false;
+            }
+            else if (l->second.writeTy || r->second.writeTy)
+                return false;
+        }
+        else if (!areEqual(seen, *l->second.type_DEPRECATED(), *r->second.type_DEPRECATED()))
             return false;
         ++l;
         ++r;
@@ -977,7 +999,7 @@ TypeId makeFunction(
     std::initializer_list<TypeId> retTypes
 );
 
-TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes); // BuiltinDefinitions.cpp
+TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes, SolverMode mode); // BuiltinDefinitions.cpp
 
 BuiltinTypes::BuiltinTypes()
     : arena(new TypeArena)
@@ -1026,16 +1048,6 @@ BuiltinTypes::~BuiltinTypes()
     FFlag::DebugLuauFreezeArena.value = prevFlag;
 }
 
-TypeId BuiltinTypes::errorRecoveryType() const
-{
-    return errorType;
-}
-
-TypePackId BuiltinTypes::errorRecoveryTypePack() const
-{
-    return errorTypePack;
-}
-
 TypeId BuiltinTypes::errorRecoveryType(TypeId guess) const
 {
     return guess;
@@ -1072,7 +1084,18 @@ void persist(TypeId ty)
             LUAU_ASSERT(ttv->state != TableState::Free && ttv->state != TableState::Unsealed);
 
             for (const auto& [_name, prop] : ttv->props)
-                queue.push_back(prop.type());
+            {
+                if (FFlag::LuauSolverV2)
+                {
+                    if (prop.readTy)
+                        queue.push_back(*prop.readTy);
+                    if (prop.writeTy)
+                        queue.push_back(*prop.writeTy);
+                }
+                else
+                    queue.push_back(prop.type_DEPRECATED());
+            }
+
 
             if (ttv->indexer)
             {
@@ -1080,10 +1103,20 @@ void persist(TypeId ty)
                 queue.push_back(ttv->indexer->indexResultType);
             }
         }
-        else if (auto etv= get<ExternType>(t))
+        else if (auto etv = get<ExternType>(t))
         {
             for (const auto& [_name, prop] : etv->props)
-                queue.push_back(prop.type());
+            {
+                if (FFlag::LuauSolverV2)
+                {
+                    if (prop.readTy)
+                        queue.push_back(*prop.readTy);
+                    if (prop.writeTy)
+                        queue.push_back(*prop.writeTy);
+                }
+                else
+                    queue.push_back(prop.type_DEPRECATED());
+            }
         }
         else if (auto utv = get<UnionType>(t))
         {

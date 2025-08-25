@@ -5,7 +5,8 @@
 #include "Luau/Scope.h"
 #include "Luau/VisitType.h"
 
-LUAU_FASTFLAG(LuauNonReentrantGeneralization3)
+LUAU_FASTFLAG(LuauEagerGeneralization4)
+LUAU_FASTFLAG(LuauExplicitSkipBoundTypes)
 
 namespace Luau
 {
@@ -21,7 +22,8 @@ struct InferPolarity : TypeVisitor
     Polarity polarity = Polarity::Positive;
 
     explicit InferPolarity(NotNull<TypeArena> arena, NotNull<Scope> scope)
-        : arena(arena)
+        : TypeVisitor("InferPolarity", FFlag::LuauExplicitSkipBoundTypes)
+        , arena(arena)
         , scope(scope)
     {
     }
@@ -53,20 +55,21 @@ struct InferPolarity : TypeVisitor
             if (prop.isShared())
             {
                 polarity = Polarity::Mixed;
-                traverse(prop.type());
+                traverse(*prop.readTy);
+                continue;
             }
-            else if (prop.isReadOnly())
+
+            if (prop.readTy)
             {
                 polarity = p;
                 traverse(*prop.readTy);
             }
-            else if (prop.isWriteOnly())
+
+            if (prop.writeTy)
             {
                 polarity = invert(p);
                 traverse(*prop.writeTy);
             }
-            else
-                LUAU_ASSERT(!"Unreachable");
         }
 
         if (tt.indexer)
@@ -133,7 +136,7 @@ struct InferPolarity : TypeVisitor
 template<typename TID>
 static void inferGenericPolarities_(NotNull<TypeArena> arena, NotNull<Scope> scope, TID ty)
 {
-    if (!FFlag::LuauNonReentrantGeneralization3)
+    if (!FFlag::LuauEagerGeneralization4)
         return;
 
     InferPolarity infer{arena, scope};

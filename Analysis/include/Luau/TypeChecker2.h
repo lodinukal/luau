@@ -194,7 +194,9 @@ private:
     void explainError(TypeId subTy, TypeId superTy, Location location, const SubtypingResult& result);
     void explainError(TypePackId subTy, TypePackId superTy, Location location, const SubtypingResult& result);
 
-    bool testPotentialLiteralIsSubtype(AstExpr* expr, TypeId expectedTy);
+    bool testLiteralOrAstTypeIsSubtype(AstExpr* expr, TypeId expectedType);
+
+    bool testPotentialLiteralIsSubtype(AstExpr* expr, TypeId expectedType);
 
     bool testIsSubtype(TypeId subTy, TypeId superTy, Location location);
     bool testIsSubtype(TypePackId subTy, TypePackId superTy, Location location);
@@ -223,11 +225,21 @@ private:
     // Avoid duplicate warnings being emitted for the same global variable.
     DenseHashSet<std::string> warnedGlobals{""};
 
+    void suggestAnnotations(AstExprFunction* expr, TypeId ty);
+
     void diagnoseMissingTableKey(UnknownProperty* utk, TypeErrorData& data) const;
     bool isErrorSuppressing(Location loc, TypeId ty);
     bool isErrorSuppressing(Location loc1, TypeId ty1, Location loc2, TypeId ty2);
     bool isErrorSuppressing(Location loc, TypePackId tp);
     bool isErrorSuppressing(Location loc1, TypePackId tp1, Location loc2, TypePackId tp2);
+
+    // Returns whether we reported any errors
+    bool reportNonviableOverloadErrors(
+        std::vector<std::pair<TypeId, ErrorVec>> nonviableOverloads,
+        Location callFuncLocation,
+        size_t argHeadSize,
+        Location callLocation
+    );
 };
 
 } // namespace Luau

@@ -8,16 +8,22 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(LuauNonReentrantGeneralization3);
+LUAU_FASTFLAG(LuauEagerGeneralization4);
+LUAU_FASTFLAG(LuauTrackFreeInteriorTypePacks)
+LUAU_FASTFLAG(LuauResetConditionalContextProperly)
 
 TEST_SUITE_BEGIN("InferPolarity");
 
 TEST_CASE_FIXTURE(Fixture, "T where T = { m: <a>(a) -> T }")
 {
-    ScopedFastFlag sff{FFlag::LuauNonReentrantGeneralization3, true};
+    ScopedFastFlag sff[] = {
+        {FFlag::LuauEagerGeneralization4, true},
+        {FFlag::LuauTrackFreeInteriorTypePacks, true},
+        {FFlag::LuauResetConditionalContextProperly, true}
+    };
 
     TypeArena arena;
-    ScopePtr globalScope = std::make_shared<Scope>(builtinTypes->anyTypePack);
+    ScopePtr globalScope = std::make_shared<Scope>(getBuiltins()->anyTypePack);
 
     TypeId tType = arena.addType(BlockedType{});
     TypeId aType = arena.addType(GenericType{globalScope.get(), "a"});
@@ -46,6 +52,43 @@ TEST_CASE_FIXTURE(Fixture, "T where T = { m: <a>(a) -> T }")
     const GenericType* aGeneric = get<GenericType>(aType);
     REQUIRE(aGeneric);
     CHECK(aGeneric->polarity == Polarity::Negative);
+}
+
+TEST_CASE_FIXTURE(Fixture, "<a, b>({ read x: a, write x: b }) -> ()")
+{
+    ScopedFastFlag sffs[] = {
+        {FFlag::LuauEagerGeneralization4, true},
+        {FFlag::LuauTrackFreeInteriorTypePacks, true},
+        {FFlag::LuauResetConditionalContextProperly, true},
+    };
+
+    TypeArena arena;
+    ScopePtr globalScope = std::make_shared<Scope>(getBuiltins()->anyTypePack);
+
+    TypeId aType = arena.addType(GenericType{globalScope.get(), "a"});
+    TypeId bType = arena.addType(GenericType{globalScope.get(), "b"});
+
+    TableType ttv;
+    ttv.state = TableState::Sealed;
+    ttv.props["x"] = Property::create({aType}, {bType});
+
+    TypeId mType = arena.addType(FunctionType{
+        TypeLevel{},
+        /* generics */ {aType, bType},
+        /* genericPacks */ {},
+        /* argPack */ arena.addTypePack({arena.addType(std::move(ttv))}),
+        /* retPack */ builtinTypes->emptyTypePack,
+    });
+
+    inferGenericPolarities(NotNull{&arena}, NotNull{globalScope.get()}, mType);
+
+    const GenericType* aGeneric = get<GenericType>(aType);
+    REQUIRE(aGeneric);
+    CHECK(aGeneric->polarity == Polarity::Negative);
+
+    const GenericType* bGeneric = get<GenericType>(bType);
+    REQUIRE(bGeneric);
+    CHECK(bGeneric->polarity == Polarity::Positive);
 }
 
 TEST_SUITE_END();

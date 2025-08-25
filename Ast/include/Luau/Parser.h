@@ -130,7 +130,13 @@ private:
     // function funcname funcbody
     LUAU_FORCEINLINE AstStat* parseFunctionStat(const AstArray<AstAttr*>& attributes = {nullptr, 0});
 
-    std::pair<bool, AstAttr::Type> validateAttribute(const char* attributeName, const TempVector<AstAttr*>& attributes);
+    std::optional<AstAttr::Type> validateAttribute(
+        Location loc,
+        const char* attributeName,
+        const TempVector<AstAttr*>& attributes,
+        const AstArray<AstExpr*>& args
+    );
+    std::optional<AstAttr::Type> validateAttribute_DEPRECATED(const char* attributeName, const TempVector<AstAttr*>& attributes);
 
     // attribute ::= '@' NAME
     void parseAttribute(TempVector<AstAttr*>& attribute);
@@ -182,14 +188,6 @@ private:
         const Name* localName,
         const AstArray<AstAttr*>& attributes
     );
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-    std::pair<AstExprFunction*, AstLocal*> parseFunctionBody_DEPRECATED(
-        bool hasself,
-        const Lexeme& matchFunction,
-        const AstName& debugname,
-        const Name* localName,
-        const AstArray<AstAttr*>& attributes
-    );
 
     // explist ::= {exp `,'} exp
     void parseExprList(TempVector<AstExpr*>& result, TempVector<Position>* commaPositions = nullptr);
@@ -231,10 +229,6 @@ private:
 
     AstTypePack* parseOptionalReturnType(Position* returnSpecifierPosition = nullptr);
     AstTypePack* parseReturnType();
-
-    // Clip with FFlagLuauStoreReturnTypesAsPackOnAst
-    std::optional<AstTypeList> parseOptionalReturnType_DEPRECATED(Position* returnSpecifierPosition = nullptr);
-    std::pair<Location, AstTypeList> parseReturnType_DEPRECATED();
 
     struct TableIndexerResult
     {
@@ -299,6 +293,7 @@ private:
     // simpleexp -> NUMBER | STRING | NIL | true | false | ... | constructor | [attributes] FUNCTION body | primaryexp
     AstExpr* parseSimpleExpr();
 
+    std::tuple<AstArray<AstExpr*>, Location, Location> parseCallList(TempVector<Position>* commaPositions);
     // args ::=  `(' [explist] `)' | tableconstructor | String
     AstExpr* parseFunctionArgs(AstExpr* func, bool self);
 
@@ -454,7 +449,7 @@ private:
         AstType* annotation;
         Position colonPosition;
 
-        explicit Binding(const Name& name, AstType* annotation = nullptr, Position colonPosition = {0,0})
+        explicit Binding(const Name& name, AstType* annotation = nullptr, Position colonPosition = {0, 0})
             : name(name)
             , annotation(annotation)
             , colonPosition(colonPosition)

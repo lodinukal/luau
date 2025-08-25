@@ -17,10 +17,9 @@ LUAU_FASTINT(LuauRecursionLimit)
 LUAU_FASTINT(LuauTypeLengthLimit)
 LUAU_FASTINT(LuauParseErrorLimit)
 LUAU_FASTFLAG(LuauSolverV2)
-LUAU_FASTFLAG(LuauStoreReturnTypesAsPackOnAst)
-LUAU_FASTFLAG(LuauParseStringIndexer)
-LUAU_FASTFLAG(LuauDeclareExternType)
 LUAU_DYNAMIC_FASTFLAG(DebugLuauReportReturnTypeVariadicWithTypeSuffix)
+LUAU_FASTFLAG(LuauParseIncompleteInterpStringsWithLocation)
+LUAU_FASTFLAG(LuauParametrizedAttributeSyntax)
 
 // Clip with DebugLuauReportReturnTypeVariadicWithTypeSuffix
 extern bool luau_telemetry_parsed_return_type_variadic_with_type_suffix;
@@ -151,20 +150,11 @@ TEST_CASE_FIXTURE(Fixture, "functions_can_have_return_annotations")
     AstStatFunction* statFunction = block->body.data[0]->as<AstStatFunction>();
     REQUIRE(statFunction != nullptr);
 
-    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-    {
-        REQUIRE(statFunction->func->returnAnnotation);
-        auto typePack = statFunction->func->returnAnnotation->as<AstTypePackExplicit>();
-        REQUIRE(typePack);
-        CHECK_EQ(typePack->typeList.types.size, 1);
-        CHECK(typePack->typeList.tailType == nullptr);
-    }
-    else
-    {
-        REQUIRE(statFunction->func->returnAnnotation_DEPRECATED.has_value());
-        CHECK_EQ(statFunction->func->returnAnnotation_DEPRECATED->types.size, 1);
-        CHECK(statFunction->func->returnAnnotation_DEPRECATED->tailType == nullptr);
-    }
+    REQUIRE(statFunction->func->returnAnnotation);
+    auto typePack = statFunction->func->returnAnnotation->as<AstTypePackExplicit>();
+    REQUIRE(typePack);
+    CHECK_EQ(typePack->typeList.types.size, 1);
+    CHECK(typePack->typeList.tailType == nullptr);
 }
 
 TEST_CASE_FIXTURE(Fixture, "functions_can_have_a_function_type_annotation")
@@ -179,28 +169,15 @@ TEST_CASE_FIXTURE(Fixture, "functions_can_have_a_function_type_annotation")
     AstStatFunction* statFunc = block->body.data[0]->as<AstStatFunction>();
     REQUIRE(statFunc != nullptr);
 
-    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-    {
-        REQUIRE(statFunc->func->returnAnnotation);
-        auto typePack = statFunc->func->returnAnnotation->as<AstTypePackExplicit>();
-        REQUIRE(typePack);
-        CHECK(typePack->typeList.tailType == nullptr);
-        AstArray<AstType*>& retTypes = typePack->typeList.types;
-        REQUIRE(retTypes.size == 1);
+    REQUIRE(statFunc->func->returnAnnotation);
+    auto typePack = statFunc->func->returnAnnotation->as<AstTypePackExplicit>();
+    REQUIRE(typePack);
+    CHECK(typePack->typeList.tailType == nullptr);
+    AstArray<AstType*>& retTypes = typePack->typeList.types;
+    REQUIRE(retTypes.size == 1);
 
-        AstTypeFunction* funTy = retTypes.data[0]->as<AstTypeFunction>();
-        REQUIRE(funTy != nullptr);
-    }
-    else
-    {
-        REQUIRE(statFunc->func->returnAnnotation_DEPRECATED.has_value());
-        CHECK(statFunc->func->returnAnnotation_DEPRECATED->tailType == nullptr);
-        AstArray<AstType*>& retTypes = statFunc->func->returnAnnotation_DEPRECATED->types;
-        REQUIRE(retTypes.size == 1);
-
-        AstTypeFunction* funTy = retTypes.data[0]->as<AstTypeFunction>();
-        REQUIRE(funTy != nullptr);
-    }
+    AstTypeFunction* funTy = retTypes.data[0]->as<AstTypeFunction>();
+    REQUIRE(funTy != nullptr);
 }
 
 TEST_CASE_FIXTURE(Fixture, "function_return_type_should_disambiguate_from_function_type_and_multiple_returns")
@@ -215,38 +192,20 @@ TEST_CASE_FIXTURE(Fixture, "function_return_type_should_disambiguate_from_functi
     AstStatFunction* statFunc = block->body.data[0]->as<AstStatFunction>();
     REQUIRE(statFunc != nullptr);
 
-    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-    {
-        REQUIRE(statFunc->func->returnAnnotation);
-        auto typePack = statFunc->func->returnAnnotation->as<AstTypePackExplicit>();
-        REQUIRE(typePack);
-        CHECK(typePack->typeList.tailType == nullptr);
-        AstArray<AstType*>& retTypes = typePack->typeList.types;
-        REQUIRE(retTypes.size == 2);
+    REQUIRE(statFunc->func->returnAnnotation);
+    auto typePack = statFunc->func->returnAnnotation->as<AstTypePackExplicit>();
+    REQUIRE(typePack);
+    CHECK(typePack->typeList.tailType == nullptr);
+    AstArray<AstType*>& retTypes = typePack->typeList.types;
+    REQUIRE(retTypes.size == 2);
 
-        AstTypeReference* ty0 = retTypes.data[0]->as<AstTypeReference>();
-        REQUIRE(ty0 != nullptr);
-        REQUIRE(ty0->name == "number");
+    AstTypeReference* ty0 = retTypes.data[0]->as<AstTypeReference>();
+    REQUIRE(ty0 != nullptr);
+    REQUIRE(ty0->name == "number");
 
-        AstTypeReference* ty1 = retTypes.data[1]->as<AstTypeReference>();
-        REQUIRE(ty1 != nullptr);
-        REQUIRE(ty1->name == "string");
-    }
-    else
-    {
-        REQUIRE(statFunc->func->returnAnnotation_DEPRECATED.has_value());
-        CHECK(statFunc->func->returnAnnotation_DEPRECATED->tailType == nullptr);
-        AstArray<AstType*>& retTypes = statFunc->func->returnAnnotation_DEPRECATED->types;
-        REQUIRE(retTypes.size == 2);
-
-        AstTypeReference* ty0 = retTypes.data[0]->as<AstTypeReference>();
-        REQUIRE(ty0 != nullptr);
-        REQUIRE(ty0->name == "number");
-
-        AstTypeReference* ty1 = retTypes.data[1]->as<AstTypeReference>();
-        REQUIRE(ty1 != nullptr);
-        REQUIRE(ty1->name == "string");
-    }
+    AstTypeReference* ty1 = retTypes.data[1]->as<AstTypeReference>();
+    REQUIRE(ty1 != nullptr);
+    REQUIRE(ty1->name == "string");
 }
 
 TEST_CASE_FIXTURE(Fixture, "function_return_type_should_parse_as_function_type_annotation_with_no_args")
@@ -261,45 +220,25 @@ TEST_CASE_FIXTURE(Fixture, "function_return_type_should_parse_as_function_type_a
     AstStatFunction* statFunc = block->body.data[0]->as<AstStatFunction>();
     REQUIRE(statFunc != nullptr);
 
-    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-    {
-        REQUIRE(statFunc->func->returnAnnotation);
-        auto typePack = statFunc->func->returnAnnotation->as<AstTypePackExplicit>();
-        REQUIRE(typePack);
-        CHECK(typePack->typeList.tailType == nullptr);
-        AstArray<AstType*>& retTypes = typePack->typeList.types;
-        REQUIRE(retTypes.size == 1);
+    REQUIRE(statFunc->func->returnAnnotation);
+    auto typePack = statFunc->func->returnAnnotation->as<AstTypePackExplicit>();
+    REQUIRE(typePack);
+    CHECK(typePack->typeList.tailType == nullptr);
+    AstArray<AstType*>& retTypes = typePack->typeList.types;
+    REQUIRE(retTypes.size == 1);
 
-        AstTypeFunction* funTy = retTypes.data[0]->as<AstTypeFunction>();
-        REQUIRE(funTy != nullptr);
-        REQUIRE(funTy->argTypes.types.size == 0);
-        CHECK(funTy->argTypes.tailType == nullptr);
+    AstTypeFunction* funTy = retTypes.data[0]->as<AstTypeFunction>();
+    REQUIRE(funTy != nullptr);
+    REQUIRE(funTy->argTypes.types.size == 0);
+    CHECK(funTy->argTypes.tailType == nullptr);
 
-        auto funReturnPack = funTy->returnTypes->as<AstTypePackExplicit>();
-        REQUIRE(funReturnPack);
-        CHECK(funReturnPack->typeList.tailType == nullptr);
+    auto funReturnPack = funTy->returnTypes->as<AstTypePackExplicit>();
+    REQUIRE(funReturnPack);
+    CHECK(funReturnPack->typeList.tailType == nullptr);
 
-        AstTypeReference* ty = funReturnPack->typeList.types.data[0]->as<AstTypeReference>();
-        REQUIRE(ty != nullptr);
-        REQUIRE(ty->name == "nil");
-    }
-    else
-    {
-        REQUIRE(statFunc->func->returnAnnotation_DEPRECATED.has_value());
-        CHECK(statFunc->func->returnAnnotation_DEPRECATED->tailType == nullptr);
-        AstArray<AstType*>& retTypes = statFunc->func->returnAnnotation_DEPRECATED->types;
-        REQUIRE(retTypes.size == 1);
-
-        AstTypeFunction* funTy = retTypes.data[0]->as<AstTypeFunction>();
-        REQUIRE(funTy != nullptr);
-        REQUIRE(funTy->argTypes.types.size == 0);
-        CHECK(funTy->argTypes.tailType == nullptr);
-        CHECK(funTy->returnTypes_DEPRECATED.tailType == nullptr);
-
-        AstTypeReference* ty = funTy->returnTypes_DEPRECATED.types.data[0]->as<AstTypeReference>();
-        REQUIRE(ty != nullptr);
-        REQUIRE(ty->name == "nil");
-    }
+    AstTypeReference* ty = funReturnPack->typeList.types.data[0]->as<AstTypeReference>();
+    REQUIRE(ty != nullptr);
+    REQUIRE(ty->name == "nil");
 }
 
 TEST_CASE_FIXTURE(Fixture, "annotations_can_be_tables")
@@ -441,17 +380,9 @@ TEST_CASE_FIXTURE(Fixture, "return_type_is_an_intersection_type_if_led_with_one_
     AstTypeFunction* annotation = local->vars.data[0]->annotation->as<AstTypeFunction>();
     REQUIRE(annotation != nullptr);
 
-    AstTypeIntersection* returnAnnotation;
-    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-    {
-        auto returnTypePack = annotation->returnTypes->as<AstTypePackExplicit>();
-        REQUIRE(returnTypePack);
-        returnAnnotation = returnTypePack->typeList.types.data[0]->as<AstTypeIntersection>();
-    }
-    else
-    {
-        returnAnnotation = annotation->returnTypes_DEPRECATED.types.data[0]->as<AstTypeIntersection>();
-    }
+    auto returnTypePack = annotation->returnTypes->as<AstTypePackExplicit>();
+    REQUIRE(returnTypePack);
+    AstTypeIntersection* returnAnnotation = returnTypePack->typeList.types.data[0]->as<AstTypeIntersection>();
     REQUIRE(returnAnnotation != nullptr);
     CHECK(returnAnnotation->types.data[0]->as<AstTypeGroup>());
     CHECK(returnAnnotation->types.data[1]->as<AstTypeFunction>());
@@ -1021,6 +952,7 @@ TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_double_brace_mid")
 
 TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_without_end_brace")
 {
+    ScopedFastFlag sff{FFlag::LuauParseIncompleteInterpStringsWithLocation, true};
     auto columnOfEndBraceError = [this](const char* code)
     {
         try
@@ -1039,9 +971,10 @@ TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_without_end_brace")
         }
     };
 
-    // This makes sure that the error is coming from the brace itself
-    CHECK_EQ(columnOfEndBraceError("_ = `{a`"), columnOfEndBraceError("_ = `{abcdefg`"));
-    CHECK_NE(columnOfEndBraceError("_ = `{a`"), columnOfEndBraceError("_ =       `{a`"));
+    // This makes sure that the error is coming from the closing brace itself
+    CHECK_EQ(columnOfEndBraceError("_ = `{a`"), 7);
+    CHECK_EQ(columnOfEndBraceError("_ = `{abcdefg`"), 13);
+    CHECK_EQ(columnOfEndBraceError("_ =       `{a`"), columnOfEndBraceError("_ = `{abcdefg`"));
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_without_end_brace_in_table")
@@ -1260,8 +1193,6 @@ until false
 
 TEST_CASE_FIXTURE(Fixture, "parse_nesting_based_end_detection_local_function")
 {
-    DOES_NOT_PASS_NEW_SOLVER_GUARD();
-
     try
     {
         parse(R"(-- i am line 1
@@ -1295,8 +1226,6 @@ end
 
 TEST_CASE_FIXTURE(Fixture, "parse_nesting_based_end_detection_failsafe_earlier")
 {
-    DOES_NOT_PASS_NEW_SOLVER_GUARD();
-
     try
     {
         parse(R"(-- i am line 1
@@ -2003,16 +1932,10 @@ TEST_CASE_FIXTURE(Fixture, "parse_declarations")
     CHECK(func->name == "bar");
     CHECK(func->nameLocation == Location({2, 25}, {2, 28}));
     REQUIRE_EQ(func->params.types.size, 1);
-    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-    {
-        auto retTypePack = func->retTypes->as<AstTypePackExplicit>();
-        REQUIRE(retTypePack);
-        REQUIRE_EQ(retTypePack->typeList.types.size, 1);
-    }
-    else
-    {
-        REQUIRE_EQ(func->retTypes_DEPRECATED.types.size, 1);
-    }
+
+    auto retTypePack = func->retTypes->as<AstTypePackExplicit>();
+    REQUIRE(retTypePack);
+    REQUIRE_EQ(retTypePack->typeList.types.size, 1);
 
     AstStatDeclareFunction* varFunc = stat->body.data[2]->as<AstStatDeclareFunction>();
     REQUIRE(varFunc);
@@ -2078,8 +2001,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_class_declarations")
 
 TEST_CASE_FIXTURE(Fixture, "parse_extern_type_declarations")
 {
-    ScopedFastFlag sff{FFlag::LuauDeclareExternType, true};
-
     AstStatBlock* stat = parseEx(R"(
         declare extern type Foo with
             prop: number
@@ -2089,7 +2010,8 @@ TEST_CASE_FIXTURE(Fixture, "parse_extern_type_declarations")
         declare extern type Bar extends Foo with
             prop2: string
         end
-    )").root;
+    )")
+                             .root;
 
     REQUIRE_EQ(stat->body.size, 2);
 
@@ -2129,8 +2051,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_extern_type_declarations")
 
 TEST_CASE_FIXTURE(Fixture, "parse_extern_type_declarations_missing_with")
 {
-    ScopedFastFlag sff{FFlag::LuauDeclareExternType, true};
-
     ParseResult result = tryParse(R"(
         declare extern type Foo
             prop: number
@@ -2186,8 +2106,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_extern_type_declarations_missing_with")
 
 TEST_CASE_FIXTURE(Fixture, "parse_extern_type_declarations")
 {
-    ScopedFastFlag sff{FFlag::LuauDeclareExternType, true};
-
     AstStatBlock* stat = parseEx(R"(
         declare extern type Foo with
             prop: number
@@ -2197,7 +2115,8 @@ TEST_CASE_FIXTURE(Fixture, "parse_extern_type_declarations")
         declare extern type Bar extends Foo with
             prop2: string
         end
-    )").root;
+    )")
+                             .root;
 
     REQUIRE_EQ(stat->body.size, 2);
 
@@ -2237,8 +2156,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_extern_type_declarations")
 
 TEST_CASE_FIXTURE(Fixture, "parse_extern_type_declarations_missing_with")
 {
-    ScopedFastFlag sff{FFlag::LuauDeclareExternType, true};
-
     ParseResult result = tryParse(R"(
         declare extern type Foo
             prop: number
@@ -2358,9 +2275,7 @@ TEST_CASE_FIXTURE(Fixture, "class_indexer")
             [number]: number
         end
         )",
-        (FFlag::LuauDeclareExternType)
-        ? "Cannot have more than one indexer on an extern type"
-        : "Cannot have more than one class indexer"
+        "Cannot have more than one indexer on an extern type"
     );
 
     REQUIRE_EQ(1, p1.root->body.size);
@@ -2395,15 +2310,7 @@ TEST_CASE_FIXTURE(Fixture, "parse_variadics")
     REQUIRE(fnFoo);
     CHECK_EQ(fnFoo->argTypes.types.size, 2);
     CHECK(fnFoo->argTypes.tailType);
-    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-    {
-        CHECK(fnFoo->returnTypes->is<AstTypePackVariadic>());
-    }
-    else
-    {
-        CHECK_EQ(fnFoo->returnTypes_DEPRECATED.types.size, 0);
-        CHECK(fnFoo->returnTypes_DEPRECATED.tailType);
-    }
+    CHECK(fnFoo->returnTypes->is<AstTypePackVariadic>());
 
     AstStatTypeAlias* bar = stat->body.data[2]->as<AstStatTypeAlias>();
     REQUIRE(bar);
@@ -2411,18 +2318,10 @@ TEST_CASE_FIXTURE(Fixture, "parse_variadics")
     REQUIRE(fnBar);
     CHECK_EQ(fnBar->argTypes.types.size, 0);
     CHECK(!fnBar->argTypes.tailType);
-    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-    {
-        auto returnTypePack = fnBar->returnTypes->as<AstTypePackExplicit>();
-        REQUIRE(returnTypePack);
-        CHECK_EQ(returnTypePack->typeList.types.size, 1);
-        CHECK(returnTypePack->typeList.tailType);
-    }
-    else
-    {
-        CHECK_EQ(fnBar->returnTypes_DEPRECATED.types.size, 1);
-        CHECK(fnBar->returnTypes_DEPRECATED.tailType);
-    }
+    auto returnTypePack = fnBar->returnTypes->as<AstTypePackExplicit>();
+    REQUIRE(returnTypePack);
+    CHECK_EQ(returnTypePack->typeList.types.size, 1);
+    CHECK(returnTypePack->typeList.tailType);
 }
 
 TEST_CASE_FIXTURE(Fixture, "variadics_must_be_last")
@@ -2488,8 +2387,7 @@ TEST_CASE_FIXTURE(Fixture, "generic_pack_parsing")
     REQUIRE(argAnnot != nullptr);
     CHECK(argAnnot->genericName == "a");
 
-    AstTypePackGeneric* retAnnot = FFlag::LuauStoreReturnTypesAsPackOnAst ? fnTy->returnTypes->as<AstTypePackGeneric>()
-                                                                          : fnTy->returnTypes_DEPRECATED.tailType->as<AstTypePackGeneric>();
+    AstTypePackGeneric* retAnnot = fnTy->returnTypes->as<AstTypePackGeneric>();
     REQUIRE(retAnnot != nullptr);
     CHECK(retAnnot->genericName == "b");
 }
@@ -2574,9 +2472,7 @@ TEST_CASE_FIXTURE(Fixture, "function_type_named_arguments")
         REQUIRE_EQ(func->argNames.size, 3);
         REQUIRE(func->argNames.data[2]);
         CHECK_EQ(func->argNames.data[2]->first, "c");
-        AstTypeFunction* funcRet = FFlag::LuauStoreReturnTypesAsPackOnAst
-                                       ? func->returnTypes->as<AstTypePackExplicit>()->typeList.types.data[0]->as<AstTypeFunction>()
-                                       : func->returnTypes_DEPRECATED.types.data[0]->as<AstTypeFunction>();
+        AstTypeFunction* funcRet = func->returnTypes->as<AstTypePackExplicit>()->typeList.types.data[0]->as<AstTypeFunction>();
         REQUIRE(funcRet != nullptr);
         REQUIRE_EQ(funcRet->argTypes.types.size, 3);
         REQUIRE_EQ(funcRet->argNames.size, 3);
@@ -2820,20 +2716,11 @@ TEST_CASE_FIXTURE(Fixture, "parse_return_type_ast_type_group")
     auto funcType = alias1->type->as<AstTypeFunction>();
     REQUIRE(funcType);
 
-    if (FFlag::LuauStoreReturnTypesAsPackOnAst)
-    {
-        auto returnTypePack = funcType->returnTypes->as<AstTypePackExplicit>();
-        REQUIRE(returnTypePack);
-        REQUIRE_EQ(1, returnTypePack->typeList.types.size);
-        REQUIRE(!returnTypePack->typeList.tailType);
-        CHECK(returnTypePack->typeList.types.data[0]->is<AstTypeGroup>());
-    }
-    else
-    {
-        REQUIRE_EQ(1, funcType->returnTypes_DEPRECATED.types.size);
-        REQUIRE(!funcType->returnTypes_DEPRECATED.tailType);
-        CHECK(funcType->returnTypes_DEPRECATED.types.data[0]->is<AstTypeGroup>());
-    }
+    auto returnTypePack = funcType->returnTypes->as<AstTypePackExplicit>();
+    REQUIRE(returnTypePack);
+    REQUIRE_EQ(1, returnTypePack->typeList.types.size);
+    REQUIRE(!returnTypePack->typeList.tailType);
+    CHECK(returnTypePack->typeList.types.data[0]->is<AstTypeGroup>());
 }
 
 TEST_CASE_FIXTURE(Fixture, "inner_and_outer_scope_of_functions_have_correct_end_position")
@@ -2905,10 +2792,13 @@ TEST_CASE_FIXTURE(Fixture, "for_loop_with_single_var_has_comma_positions_of_size
     ParseOptions parseOptions;
     parseOptions.storeCstData = true;
 
-    ParseResult result = parseEx(R"(
+    ParseResult result = parseEx(
+        R"(
         for value in tbl do
         end
-    )", parseOptions);
+    )",
+        parseOptions
+    );
     REQUIRE(result.root);
     REQUIRE_EQ(1, result.root->body.size);
 
@@ -3364,8 +3254,6 @@ TEST_CASE_FIXTURE(Fixture, "AstName_comparison")
 
 TEST_CASE_FIXTURE(Fixture, "generic_type_list_recovery")
 {
-    DOES_NOT_PASS_NEW_SOLVER_GUARD();
-
     try
     {
         parse(R"(
@@ -3841,6 +3729,118 @@ end)");
     checkAttribute(attributes.data[0], AstAttr::Type::Checked, Location(Position(1, 0), Position(1, 8)));
 }
 
+TEST_CASE_FIXTURE(Fixture, "parse_parametrized_attribute_on_function_stat")
+{
+    ScopedFastFlag sff{FFlag::LuauParametrizedAttributeSyntax, true};
+
+    AstStatBlock* stat = parse(R"(
+@[deprecated{ use = "greetng", reason = "Using <hello> is too causal"}]
+function hello(x, y)
+    return x + y
+end)");
+
+    LUAU_ASSERT(stat != nullptr);
+
+    AstStatFunction* statFun = stat->body.data[0]->as<AstStatFunction>();
+    LUAU_ASSERT(statFun != nullptr);
+
+    AstArray<AstAttr*> attributes = statFun->func->attributes;
+
+    CHECK_EQ(attributes.size, 1);
+
+    checkAttribute(attributes.data[0], AstAttr::Type::Deprecated, Location(Position(1, 2), Position(1, 70)));
+}
+
+TEST_CASE_FIXTURE(Fixture, "non_literal_attribute_arguments_is_not_allowed")
+{
+    ScopedFastFlag sff{FFlag::LuauParametrizedAttributeSyntax, true};
+    ParseResult result = tryParse(R"(
+@[deprecated{ reason = reasonString }]
+function hello(x, y)
+    return x + y
+end)");
+
+    checkFirstErrorForAttributes(
+        result.errors, 1, Location(Position(1, 13), Position(1, 37)), "Only literals can be passed as arguments for attributes"
+    );
+}
+
+TEST_CASE_FIXTURE(Fixture, "unknown_arguments_for_depricated_is_not_allowed")
+{
+    ScopedFastFlag sff{FFlag::LuauParametrizedAttributeSyntax, true};
+    ParseResult result = tryParse(R"(
+@[deprecated({}, "Very deprecated")]
+function hello(x, y)
+    return x + y
+end)");
+
+    checkFirstErrorForAttributes(result.errors, 1, Location(Position(1, 2), Position(1, 12)), "@deprecated can be parametrized only by 1 argument");
+
+    result = tryParse(R"(
+@[deprecated "Very deprecated"]
+function hello(x, y)
+    return x + y
+end)");
+
+    checkFirstErrorForAttributes(result.errors, 1, Location(Position(1, 13), Position(1, 30)), "Unknown argument type for @deprecated");
+
+    result = tryParse(R"(
+@[deprecated{ foo = "bar" }]
+function hello(x, y)
+    return x + y
+end)");
+
+    checkFirstErrorForAttributes(
+        result.errors,
+        1,
+        Location(Position(1, 14), Position(1, 17)),
+        "Unknown argument 'foo' for @deprecated. Only string constants for 'use' and 'reason' are allowed"
+    );
+
+    result = tryParse(R"(
+@[deprecated{ use = 5 }]
+function hello(x, y)
+    return x + y
+end)");
+
+    checkFirstErrorForAttributes(result.errors, 1, Location(Position(1, 20), Position(1, 21)), "Only constant string allowed as value for 'use'");
+}
+
+TEST_CASE_FIXTURE(Fixture, "do_not_hang_on_incomplete_attribute_list")
+{
+    ScopedFastFlag sff{FFlag::LuauParametrizedAttributeSyntax, true};
+    ParseResult result = tryParse(R"(
+@[]
+function hello(x, y)
+    return x + y
+end)");
+    checkFirstErrorForAttributes(
+        result.errors, 1, Location(Position(1, 0), Position(1, 3)), "Attribute list cannot be empty"
+    );
+
+    result = tryParse(R"(@[)");
+
+    checkFirstErrorForAttributes(
+        result.errors, 1, Location(Position(0, 2), Position(0, 2)), "Expected identifier when parsing attribute name, got <eof>"
+    );
+
+    result = tryParse(R"(@[
+        function foo() end
+    )");
+
+    checkFirstErrorForAttributes(
+        result.errors, 1, Location(Position(1, 8), Position(1, 16)), "Expected identifier when parsing attribute name, got 'function'"
+    );
+
+    result = tryParse(R"(@[deprecated
+        local function foo() end
+    )");
+
+    checkFirstErrorForAttributes(
+        result.errors, 1, Location(Position(1, 8), Position(1, 13)), "Expected ']' (to close '@[' at line 1), got 'local'"
+    );
+}
+
 TEST_CASE_FIXTURE(Fixture, "parse_attribute_for_function_expression")
 {
     AstStatBlock* stat1 = parse(R"(
@@ -4191,7 +4191,7 @@ TEST_CASE_FIXTURE(Fixture, "grouped_function_type")
     CHECK_EQ(unionTy->types.size, 2);
     auto groupTy = unionTy->types.data[0]->as<AstTypeGroup>(); // (() -> ())
     REQUIRE(groupTy);
-    CHECK(groupTy->type->is<AstTypeFunction>()); // () -> ()
+    CHECK(groupTy->type->is<AstTypeFunction>());          // () -> ()
     CHECK(unionTy->types.data[1]->is<AstTypeOptional>()); // ?
 }
 
@@ -4309,8 +4309,136 @@ TEST_CASE_FIXTURE(Fixture, "parsing_type_suffix_for_return_type_with_variadic")
 
 TEST_CASE_FIXTURE(Fixture, "parsing_string_union_indexers")
 {
-    ScopedFastFlag _{FFlag::LuauParseStringIndexer, true};
     parse(R"(type foo = { ["bar" | "baz"]: number })");
+}
+
+TEST_CASE_FIXTURE(Fixture, "parsing_incomplete_string_interpolation_missing_curly_at_eof")
+{
+    ScopedFastFlag _{FFlag::LuauParseIncompleteInterpStringsWithLocation, true};
+    auto parseResult = tryParse(R"(print(`{e.x} {e.a)");
+    const auto first = parseResult.root->body.data[0];
+    auto expr = first->as<AstStatExpr>();
+    CHECK(expr != nullptr);
+    auto call = expr->expr->as<AstExprCall>();
+    CHECK(call != nullptr);
+    auto interpString = call->args.data[0]->as<AstExprInterpString>();
+    CHECK(interpString != nullptr);
+    CHECK(interpString->expressions.size == 2);
+    CHECK(interpString->location.begin == Position(0, 6));
+    CHECK(interpString->location.end == Position(0, 17));
+    CHECK_EQ(parseResult.errors.size(), 2);
+
+    auto err = parseResult.errors[0];
+    CHECK_EQ(err.getMessage(), "Malformed interpolated string; did you forget to add a '}'?");
+    CHECK_EQ(err.getLocation(), Location({0, 16}, {0, 17}));
+}
+
+TEST_CASE_FIXTURE(Fixture, "parsing_incomplete_string_interpolation_missing_backtick_at_eof")
+{
+    ScopedFastFlag _{FFlag::LuauParseIncompleteInterpStringsWithLocation, true};
+    auto parseResult = tryParse(R"(print(`{e.x} {e.a})");
+    const auto first = parseResult.root->body.data[0];
+    auto expr = first->as<AstStatExpr>();
+    CHECK(expr != nullptr);
+    auto call = expr->expr->as<AstExprCall>();
+    CHECK(call != nullptr);
+    auto interpString = call->args.data[0]->as<AstExprInterpString>();
+    CHECK(interpString != nullptr);
+    CHECK(interpString->expressions.size == 2);
+    CHECK(interpString->location.begin == Position(0, 6));
+    CHECK(interpString->location.end == Position(0, 18));
+    CHECK_EQ(parseResult.errors.size(), 2);
+
+    auto err = parseResult.errors[0];
+    CHECK_EQ(err.getMessage(), "Malformed interpolated string; did you forget to add a '`'?");
+    CHECK_EQ(err.getLocation(), Location({0, 17}, {0, 18}));
+}
+
+TEST_CASE_FIXTURE(Fixture, "parsing_incomplete_string_interpolation_missing_curly_with_backtick_at_eof")
+{
+    ScopedFastFlag _{FFlag::LuauParseIncompleteInterpStringsWithLocation, true};
+    auto parseResult = tryParse(R"(print(`{e.x} {e.a`)");
+    const auto first = parseResult.root->body.data[0];
+    auto expr = first->as<AstStatExpr>();
+    CHECK(expr != nullptr);
+    auto call = expr->expr->as<AstExprCall>();
+    CHECK(call != nullptr);
+    auto interpString = call->args.data[0]->as<AstExprInterpString>();
+    CHECK(interpString != nullptr);
+    CHECK(interpString->expressions.size == 2);
+    CHECK(interpString->location.begin == Position(0, 6));
+    CHECK(interpString->location.end == Position(0, 18));
+    CHECK_EQ(parseResult.errors.size(), 2);
+
+    auto err = parseResult.errors[0];
+    CHECK_EQ(err.getMessage(), "Malformed interpolated string; did you forget to add a '}'?");
+    CHECK_EQ(err.getLocation(), Location({0, 17}, {0, 18}));
+}
+
+TEST_CASE_FIXTURE(Fixture, "parsing_incomplete_string_interpolation_missing_curly_broken_string")
+{
+    ScopedFastFlag _{FFlag::LuauParseIncompleteInterpStringsWithLocation, true};
+    auto parseResult = tryParse(R"(print(`{e.x} {e.a
+)");
+    const auto first = parseResult.root->body.data[0];
+    auto expr = first->as<AstStatExpr>();
+    CHECK(expr != nullptr);
+    auto call = expr->expr->as<AstExprCall>();
+    CHECK(call != nullptr);
+    auto interpString = call->args.data[0]->as<AstExprInterpString>();
+    CHECK(interpString != nullptr);
+    CHECK(interpString->expressions.size == 2);
+    CHECK(interpString->location.begin == Position(0, 6));
+    CHECK(interpString->location.end == Position(0, 17));
+    CHECK_EQ(parseResult.errors.size(), 2);
+
+    auto err = parseResult.errors[0];
+    CHECK_EQ(err.getMessage(), "Malformed interpolated string; did you forget to add a '}'?");
+    CHECK_EQ(err.getLocation(), Location({0, 16}, {0, 17}));
+}
+
+TEST_CASE_FIXTURE(Fixture, "parsing_incomplete_string_interpolation_missing_backtick_broken_string")
+{
+    ScopedFastFlag _{FFlag::LuauParseIncompleteInterpStringsWithLocation, true};
+    auto parseResult = tryParse(R"(print(`{e.x} {e.a}
+)");
+    const auto first = parseResult.root->body.data[0];
+    auto expr = first->as<AstStatExpr>();
+    CHECK(expr != nullptr);
+    auto call = expr->expr->as<AstExprCall>();
+    CHECK(call != nullptr);
+    auto interpString = call->args.data[0]->as<AstExprInterpString>();
+    CHECK(interpString != nullptr);
+    CHECK(interpString->expressions.size == 2);
+    CHECK(interpString->location.begin == Position(0, 6));
+    CHECK(interpString->location.end == Position(0, 18));
+    CHECK_EQ(parseResult.errors.size(), 2);
+
+    auto err = parseResult.errors[0];
+    CHECK_EQ(err.getMessage(), "Malformed interpolated string; did you forget to add a '`'?");
+    CHECK_EQ(err.getLocation(), Location({0, 17}, {0, 18}));
+}
+
+TEST_CASE_FIXTURE(Fixture, "parsing_incomplete_string_interpolation_missing_curly_with_backtick_broken_string")
+{
+    ScopedFastFlag _{FFlag::LuauParseIncompleteInterpStringsWithLocation, true};
+    auto parseResult = tryParse(R"(print(`{e.x} {e.a`
+)");
+    const auto first = parseResult.root->body.data[0];
+    auto expr = first->as<AstStatExpr>();
+    CHECK(expr != nullptr);
+    auto call = expr->expr->as<AstExprCall>();
+    CHECK(call != nullptr);
+    auto interpString = call->args.data[0]->as<AstExprInterpString>();
+    CHECK(interpString != nullptr);
+    CHECK(interpString->expressions.size == 2);
+    CHECK(interpString->location.begin == Position(0, 6));
+    CHECK(interpString->location.end == Position(0, 18));
+    CHECK_EQ(parseResult.errors.size(), 2);
+
+    auto err = parseResult.errors[0];
+    CHECK_EQ(err.getMessage(), "Malformed interpolated string; did you forget to add a '}'?");
+    CHECK_EQ(err.getLocation(), Location({0, 17}, {0, 18}));
 }
 
 TEST_SUITE_END();

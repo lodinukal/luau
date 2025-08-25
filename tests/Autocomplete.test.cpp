@@ -19,7 +19,9 @@
 LUAU_FASTFLAG(LuauTraceTypesInNonstrictMode2)
 LUAU_FASTFLAG(LuauSetMetatableDoesNotTimeTravel)
 LUAU_FASTINT(LuauTypeInferRecursionLimit)
-LUAU_FASTFLAG(LuauNonReentrantGeneralization3)
+LUAU_FASTFLAG(LuauEagerGeneralization4)
+LUAU_FASTFLAG(LuauImplicitTableIndexerKeys3)
+LUAU_FASTFLAG(LuauIncludeBreakContinueStatements)
 
 using namespace Luau;
 
@@ -41,9 +43,12 @@ struct ACFixtureImpl : BaseType
         FrontendOptions opts;
         opts.forAutocomplete = true;
         opts.retainFullTypeGraphs = true;
-        this->frontend.check("MainModule", opts);
+        // NOTE: Autocomplete does *not* require strict checking, meaning we should
+        // try to check all of these examples in `--!nocheck` mode.
+        this->configResolver.defaultConfig.mode = Mode::NoCheck;
+        this->getFrontend().check("MainModule", opts);
 
-        return Luau::autocomplete(this->frontend, "MainModule", Position{row, column}, nullCallback);
+        return Luau::autocomplete(this->getFrontend(), "MainModule", Position{row, column}, nullCallback);
     }
 
     AutocompleteResult autocomplete(char marker, StringCompletionCallback callback = nullCallback)
@@ -51,9 +56,12 @@ struct ACFixtureImpl : BaseType
         FrontendOptions opts;
         opts.forAutocomplete = true;
         opts.retainFullTypeGraphs = true;
-        this->frontend.check("MainModule", opts);
+        // NOTE: Autocomplete does *not* require strict checking, meaning we should
+        // try to check all of these examples in `--!nocheck` mode.
+        this->configResolver.defaultConfig.mode = Mode::NoCheck;
+        this->getFrontend().check("MainModule", opts);
 
-        return Luau::autocomplete(this->frontend, "MainModule", getPosition(marker), callback);
+        return Luau::autocomplete(this->getFrontend(), "MainModule", getPosition(marker), callback);
     }
 
     AutocompleteResult autocomplete(const ModuleName& name, Position pos, StringCompletionCallback callback = nullCallback)
@@ -61,9 +69,12 @@ struct ACFixtureImpl : BaseType
         FrontendOptions opts;
         opts.forAutocomplete = true;
         opts.retainFullTypeGraphs = true;
-        this->frontend.check(name, opts);
+        // NOTE: Autocomplete does *not* require strict checking, meaning we should
+        // try to check all of these examples in `--!nocheck` mode.
+        this->configResolver.defaultConfig.mode = Mode::NoCheck;
+        this->getFrontend().check(name, opts);
 
-        return Luau::autocomplete(this->frontend, name, pos, callback);
+        return Luau::autocomplete(this->getFrontend(), name, pos, callback);
     }
 
     CheckResult check(const std::string& source)
@@ -103,23 +114,25 @@ struct ACFixtureImpl : BaseType
         }
         LUAU_ASSERT("Digit expected after @ symbol" && prevChar != '@');
 
-        return BaseType::check(filteredSource);
+        // NOTE: Autocomplete does *not* require strict checking, meaning we should
+        // try to check all of these examples in `--!nocheck` mode.
+        return BaseType::check(Mode::NoCheck, filteredSource, std::nullopt);
     }
 
     LoadDefinitionFileResult loadDefinition(const std::string& source)
     {
-        GlobalTypes& globals = this->frontend.globalsForAutocomplete;
+        GlobalTypes& globals = this->getFrontend().globalsForAutocomplete;
         unfreeze(globals.globalTypes);
-        LoadDefinitionFileResult result = this->frontend.loadDefinitionFile(
+        LoadDefinitionFileResult result = this->getFrontend().loadDefinitionFile(
             globals, globals.globalScope, source, "@test", /* captureComments */ false, /* typeCheckForAutocomplete */ true
         );
         freeze(globals.globalTypes);
 
         if (FFlag::LuauSolverV2)
         {
-            GlobalTypes& globals = this->frontend.globals;
+            GlobalTypes& globals = this->getFrontend().globals;
             unfreeze(globals.globalTypes);
-            LoadDefinitionFileResult result = this->frontend.loadDefinitionFile(
+            LoadDefinitionFileResult result = this->getFrontend().loadDefinitionFile(
                 globals, globals.globalScope, source, "@test", /* captureComments */ false, /* typeCheckForAutocomplete */ true
             );
             freeze(globals.globalTypes);
@@ -144,10 +157,11 @@ struct ACFixture : ACFixtureImpl<Fixture>
     ACFixture()
         : ACFixtureImpl<Fixture>()
     {
-        addGlobalBinding(frontend.globals, "table", Binding{builtinTypes->anyType});
-        addGlobalBinding(frontend.globals, "math", Binding{builtinTypes->anyType});
-        addGlobalBinding(frontend.globalsForAutocomplete, "table", Binding{builtinTypes->anyType});
-        addGlobalBinding(frontend.globalsForAutocomplete, "math", Binding{builtinTypes->anyType});
+        // TODO - move this into its own consructor
+        addGlobalBinding(getFrontend().globals, "table", Binding{getBuiltins()->anyType});
+        addGlobalBinding(getFrontend().globals, "math", Binding{getBuiltins()->anyType});
+        addGlobalBinding(getFrontend().globalsForAutocomplete, "table", Binding{getBuiltins()->anyType});
+        addGlobalBinding(getFrontend().globalsForAutocomplete, "math", Binding{getBuiltins()->anyType});
     }
 };
 
@@ -1376,14 +1390,14 @@ export type B = { z: number, w: number }
 return {}
     )";
 
-    LUAU_REQUIRE_NO_ERRORS(frontend.check("Module/A"));
+    LUAU_REQUIRE_NO_ERRORS(getFrontend().check("Module/A"));
 
     fileResolver.source["Module/B"] = R"(
 local aaa = require(script.Parent.A)
 local a: aa
     )";
 
-    frontend.check("Module/B");
+    getFrontend().check("Module/B");
 
     auto ac = autocomplete("Module/B", Position{2, 11});
 
@@ -1399,14 +1413,14 @@ export type B = { z: number, w: number }
 return {}
     )";
 
-    LUAU_REQUIRE_NO_ERRORS(frontend.check("Module/A"));
+    LUAU_REQUIRE_NO_ERRORS(getFrontend().check("Module/A"));
 
     fileResolver.source["Module/B"] = R"(
 local aaa = require(script.Parent.A)
 local a: aaa.
     )";
 
-    frontend.check("Module/B");
+    getFrontend().check("Module/B");
 
     auto ac = autocomplete("Module/B", Position{2, 13});
 
@@ -2059,14 +2073,14 @@ local function b(a: ((done) -> number) -> number) return a(function(done) return
 return {a = a, b = b}
     )";
 
-    LUAU_REQUIRE_NO_ERRORS(frontend.check("Module/A"));
+    LUAU_REQUIRE_NO_ERRORS(getFrontend().check("Module/A"));
 
     fileResolver.source["Module/B"] = R"(
 local ex = require(script.Parent.A)
 ex.a(function(x:
     )";
 
-    frontend.check("Module/B");
+    getFrontend().check("Module/B");
 
     auto ac = autocomplete("Module/B", Position{2, 16});
 
@@ -2077,7 +2091,7 @@ local ex = require(script.Parent.A)
 ex.b(function(x:
     )";
 
-    frontend.check("Module/C");
+    getFrontend().check("Module/C");
 
     ac = autocomplete("Module/C", Position{2, 16});
 
@@ -2093,14 +2107,14 @@ local function b(a: ((done) -> number) -> number) return a(function(done) return
 return {a = a, b = b}
     )";
 
-    LUAU_REQUIRE_NO_ERRORS(frontend.check("Module/A"));
+    LUAU_REQUIRE_NO_ERRORS(getFrontend().check("Module/A"));
 
     fileResolver.source["Module/B"] = R"(
 local ex = require(script.Parent.A)
 ex.a(function(x:
     )";
 
-    frontend.check("Module/B");
+    getFrontend().check("Module/B");
 
     auto ac = autocomplete("Module/B", Position{2, 16});
 
@@ -2113,7 +2127,7 @@ local ex = require(script.Parent.A)
 ex.b(function(x:
     )";
 
-    frontend.check("Module/C");
+    getFrontend().check("Module/C");
 
     ac = autocomplete("Module/C", Position{2, 16});
 
@@ -2191,7 +2205,10 @@ local fp: @1= f
     if (FFlag::LuauSolverV2)
         REQUIRE_EQ("({ x: number, y: number }) -> number", toString(requireType("f")));
     else
-        REQUIRE_EQ("({| x: number, y: number |}) -> number", toString(requireType("f")));
+    {
+        // NOTE: All autocomplete tests occur under no-check mode.
+        REQUIRE_EQ("({| x: number, y: number |}) -> (...any)", toString(requireType("f")));
+    }
     CHECK(ac.entryMap.count("({ x: number, y: number }) -> number"));
 }
 
@@ -2426,14 +2443,14 @@ export type other = { z: number, w: number }
 return {}
     )";
 
-    LUAU_REQUIRE_NO_ERRORS(frontend.check("Module/A"));
+    LUAU_REQUIRE_NO_ERRORS(getFrontend().check("Module/A"));
 
     fileResolver.source["Module/B"] = R"(
 local aaa = require(script.Parent.A)
 local a: aaa.do
     )";
 
-    frontend.check("Module/B");
+    getFrontend().check("Module/B");
 
     auto ac = autocomplete("Module/B", Position{2, 15});
 
@@ -3074,12 +3091,29 @@ TEST_CASE_FIXTURE(ACBuiltinsFixture, "autocomplete_on_string_singletons")
     CHECK(ac.entryMap.count("format"));
 }
 
-TEST_CASE_FIXTURE(ACFixture, "autocomplete_string_singletons")
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_string_singletons_in_literal")
 {
-    if (FFlag::LuauSolverV2) // CLI-116814 Autocomplete needs to populate expected types for function arguments correctly
-                             // (overloads and singletons)
+    if (FFlag::LuauSolverV2)
         return;
 
+    // CLI-116814: Under the new solver, we fail to properly apply the expected
+    // type to `tag` as we fail to recognize that we can "break apart" unions
+    // when trying to apply an expected type.
+
+    check(R"(
+        type tagged = {tag:"cat", fieldx:number} | {tag:"dog", fieldy:number}
+        local x: tagged = {tag="@1"}
+    )");
+
+    auto ac = autocomplete('1');
+
+    CHECK(ac.entryMap.count("cat"));
+    CHECK(ac.entryMap.count("dog"));
+    CHECK_EQ(ac.context, AutocompleteContext::String);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_string_singletons")
+{
     check(R"(
         type tag = "cat" | "dog"
         local function f(a: tag) end
@@ -3105,22 +3139,10 @@ TEST_CASE_FIXTURE(ACFixture, "autocomplete_string_singletons")
     CHECK(ac.entryMap.count("cat"));
     CHECK(ac.entryMap.count("dog"));
     CHECK_EQ(ac.context, AutocompleteContext::String);
-
-    check(R"(
-        type tagged = {tag:"cat", fieldx:number} | {tag:"dog", fieldy:number}
-        local x: tagged = {tag="@4"}
-    )");
-
-    ac = autocomplete('4');
-
-    CHECK(ac.entryMap.count("cat"));
-    CHECK(ac.entryMap.count("dog"));
-    CHECK_EQ(ac.context, AutocompleteContext::String);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "string_singleton_as_table_key_iso")
 {
-
     check(R"(
         type Direction = "up" | "down"
         local b: {[Direction]: boolean} = {["@2"] = true}
@@ -3691,7 +3713,7 @@ local a = { x = 2, y = 4 }
 a.@1
     )");
 
-    frontend.clear();
+    getFrontend().clear();
 
     auto ac = autocomplete('1');
 
@@ -3700,21 +3722,21 @@ a.@1
     CHECK(ac.entryMap.count("x"));
     CHECK(ac.entryMap.count("y"));
 
-    frontend.check("MainModule", {});
+    getFrontend().check("MainModule", {});
 
     ac = autocomplete('1');
 
     CHECK(ac.entryMap.count("x"));
     CHECK(ac.entryMap.count("y"));
 
-    frontend.markDirty("MainModule", nullptr);
+    getFrontend().markDirty("MainModule", nullptr);
 
     ac = autocomplete('1');
 
     CHECK(ac.entryMap.count("x"));
     CHECK(ac.entryMap.count("y"));
 
-    frontend.check("MainModule", {});
+    getFrontend().check("MainModule", {});
 
     ac = autocomplete('1');
 
@@ -3749,7 +3771,7 @@ TEST_CASE_FIXTURE(ACFixture, "string_contents_is_available_to_callback")
         declare function require(path: string): any
     )");
 
-    GlobalTypes& globals = FFlag::LuauSolverV2 ? frontend.globals : frontend.globalsForAutocomplete;
+    GlobalTypes& globals = FFlag::LuauSolverV2 ? getFrontend().globals : getFrontend().globalsForAutocomplete;
 
     std::optional<Binding> require = globals.globalScope->linearSearchForBinding("require");
     REQUIRE(require);
@@ -3930,7 +3952,7 @@ local a: T@1
     CHECK_EQ(ac.context, AutocompleteContext::Type);
 }
 
-TEST_CASE_FIXTURE(ACFixture, "frontend_use_correct_global_scope")
+TEST_CASE_FIXTURE(ACFixture, "getFrontend().use_correct_global_scope")
 {
     loadDefinition(R"(
         declare class Instance
@@ -3956,7 +3978,7 @@ TEST_CASE_FIXTURE(ACFixture, "string_completion_outside_quotes")
         declare function require(path: string): any
     )");
 
-    GlobalTypes& globals = FFlag::LuauSolverV2 ? frontend.globals : frontend.globalsForAutocomplete;
+    GlobalTypes& globals = FFlag::LuauSolverV2 ? getFrontend().globals : getFrontend().globalsForAutocomplete;
 
     std::optional<Binding> require = globals.globalScope->linearSearchForBinding("require");
     REQUIRE(require);
@@ -4454,10 +4476,10 @@ TEST_CASE_FIXTURE(ACExternTypeFixture, "ac_dont_overflow_on_recursive_union")
 
     auto ac = autocomplete('1');
 
-    if (FFlag::LuauSolverV2 && FFlag::LuauNonReentrantGeneralization3)
+    if (FFlag::LuauSolverV2 && FFlag::LuauEagerGeneralization4)
     {
-        // This `if` statement is because `LuauNonReentrantGeneralization3`
-        // sets some flags 
+        // This `if` statement is because `LuauEagerGeneralization4`
+        // sets some flags
         CHECK(ac.entryMap.count("BaseMethod") > 0);
         CHECK(ac.entryMap.count("Method") > 0);
     }
@@ -4466,7 +4488,6 @@ TEST_CASE_FIXTURE(ACExternTypeFixture, "ac_dont_overflow_on_recursive_union")
         // Otherwise, we don't infer anything for `value`, which is _fine_.
         CHECK(ac.entryMap.empty());
     }
-
 }
 
 TEST_CASE_FIXTURE(ACBuiltinsFixture, "type_function_has_types_definitions")
@@ -4488,8 +4509,8 @@ TEST_CASE_FIXTURE(ACBuiltinsFixture, "type_function_private_scope")
     ScopedFastFlag newSolver{FFlag::LuauSolverV2, true};
 
     // Global scope polution by the embedder has no effect
-    addGlobalBinding(frontend.globals, "thisAlsoShouldNotBeThere", Binding{builtinTypes->anyType});
-    addGlobalBinding(frontend.globalsForAutocomplete, "thisAlsoShouldNotBeThere", Binding{builtinTypes->anyType});
+    addGlobalBinding(getFrontend().globals, "thisAlsoShouldNotBeThere", Binding{getBuiltins()->anyType});
+    addGlobalBinding(getFrontend().globalsForAutocomplete, "thisAlsoShouldNotBeThere", Binding{getBuiltins()->anyType});
 
     check(R"(
 local function thisShouldNotBeThere() end
@@ -4534,6 +4555,327 @@ end
     auto ac = autocomplete('1');
     CHECK_EQ(ac.entryMap.count("boolean"), 1);
     CHECK_EQ(ac.entryMap.count("number"), 1);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_for_assignment")
+{
+    check(R"(
+        local function foobar(tbl: { tag: "left" | "right" })
+            tbl.tag = "@1"
+        end
+    )");
+
+    auto ac = autocomplete('1');
+    CHECK_EQ(ac.entryMap.count("left"), 1);
+    CHECK_EQ(ac.entryMap.count("right"), 1);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_in_local_table")
+{
+    check(R"(
+        type Entry = { field: number, prop: string }
+        local x : {Entry} = {}
+        x[1] = {
+           f@1,
+           p@2,
+        }
+
+        local t : { key1: boolean, thing2: CFrame, aaa3: vector } = {
+            k@3,
+            th@4,
+        }
+    )");
+
+    auto ac1 = autocomplete('1');
+    CHECK_EQ(ac1.entryMap.count("field"), 1);
+    auto ac2 = autocomplete('2');
+    CHECK_EQ(ac2.entryMap.count("prop"), 1);
+    auto ac3 = autocomplete('3');
+    CHECK_EQ(ac3.entryMap.count("key1"), 1);
+    auto ac4 = autocomplete('4');
+    CHECK_EQ(ac4.entryMap.count("thing2"), 1);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_in_type_assertion")
+{
+    check(R"(
+        type Entry = { field: number, prop: string }
+        return ( { f@1, p@2 } :: Entry )
+    )");
+
+    auto ac1 = autocomplete('1');
+    CHECK_EQ(ac1.entryMap.count("field"), 1);
+    auto ac2 = autocomplete('2');
+    CHECK_EQ(ac2.entryMap.count("prop"), 1);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_implicit_named_index_index_expr")
+{
+    ScopedFastFlag sffs[] = {
+        // Somewhat surprisingly, the old solver didn't cover this case.
+        {FFlag::LuauSolverV2, true},
+        {FFlag::LuauImplicitTableIndexerKeys3, true},
+    };
+
+    check(R"(
+        type Constraint = "A" | "B" | "C"
+        local foo : { [Constraint]: string } = {
+            A = "Value for A",
+            B = "Value for B",
+            C = "Value for C",
+        }
+        foo["@1"]
+    )");
+
+    auto ac = autocomplete('1');
+    CHECK_EQ(ac.entryMap.count("A"), 1);
+    CHECK_EQ(ac.entryMap["A"].kind, AutocompleteEntryKind::String);
+    CHECK_EQ(ac.entryMap.count("B"), 1);
+    CHECK_EQ(ac.entryMap["B"].kind, AutocompleteEntryKind::String);
+    CHECK_EQ(ac.entryMap.count("C"), 1);
+    CHECK_EQ(ac.entryMap["C"].kind, AutocompleteEntryKind::String);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_implicit_named_index_index_expr_without_annotation")
+{
+    ScopedFastFlag sffs[] = {
+        {FFlag::LuauSolverV2, true},
+        {FFlag::LuauImplicitTableIndexerKeys3, true},
+    };
+
+    check(R"(
+        local foo = {
+            ["Item/Foo"] = 42,
+            ["Item/Bar"] = "it's true",
+            ["Item/Baz"] = true,
+        }
+        foo["@1"]
+    )");
+
+    auto ac = autocomplete('1');
+
+    auto checkEntry = [&](auto key, auto type)
+    {
+        REQUIRE_EQ(ac.entryMap.count(key), 1);
+        auto entry = ac.entryMap.at(key);
+        CHECK_EQ(entry.kind, AutocompleteEntryKind::Property);
+        REQUIRE(entry.type);
+        CHECK_EQ(type, toString(*entry.type));
+    };
+
+    checkEntry("Item/Foo", "number");
+    checkEntry("Item/Bar", "string");
+    checkEntry("Item/Baz", "boolean");
+}
+
+TEST_CASE_FIXTURE(ACFixture, "bidirectional_autocomplete_in_function_call")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    check(R"(
+        local function take(_: { choice: "left" | "right" }) end
+
+        take({ choice = "@1" })
+    )");
+
+    auto ac = autocomplete('1');
+    CHECK_EQ(ac.entryMap.count("left"), 1);
+    CHECK_EQ(ac.entryMap.count("right"), 1);
+}
+
+TEST_CASE_FIXTURE(ACBuiltinsFixture, "autocomplete_via_bidirectional_self")
+{
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
+
+    check(R"(
+        type IAccount = {
+            __index: IAccount,
+            new : (string, number) -> Account,
+            report: (self: Account) -> (),
+        }
+
+        export type Account = setmetatable<{
+            name: string,
+            balance: number
+        }, IAccount>;
+
+        local Account = {} :: IAccount
+        Account.__index = Account
+
+        function Account.new(name, balance): Account
+            local self = {}
+            self.name = name
+            self.balance = balance
+            return setmetatable(self, Account)
+        end
+
+        function Account:report()
+            print("My balance is: " .. self.@1)
+        end
+    )");
+
+    auto ac = autocomplete('1');
+    CHECK_EQ(ac.entryMap.count("name"), 1);
+    CHECK_EQ(ac.entryMap.count("balance"), 1);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_include_break_continue_in_loop")
+{
+    ScopedFastFlag sff{FFlag::LuauIncludeBreakContinueStatements, true};
+
+    check(R"(for x in y do
+        @1
+        if true then
+            @2
+        end
+    end)");
+
+    auto ac = autocomplete('1');
+
+    CHECK(ac.entryMap.count("break") > 0);
+    CHECK(ac.entryMap.count("continue") > 0);
+
+    ac = autocomplete('2');
+
+    CHECK(ac.entryMap.count("break") > 0);
+    CHECK(ac.entryMap.count("continue") > 0);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_exclude_break_continue_outside_loop")
+{
+    ScopedFastFlag sff{FFlag::LuauIncludeBreakContinueStatements, true};
+
+    check(R"(@1if true then
+        @2
+    end)");
+
+    auto ac = autocomplete('1');
+
+    CHECK_EQ(ac.entryMap.count("break"), 0);
+    CHECK_EQ(ac.entryMap.count("continue"), 0);
+
+    ac = autocomplete('2');
+    CHECK_EQ(ac.entryMap.count("break"), 0);
+    CHECK_EQ(ac.entryMap.count("continue"), 0);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_exclude_break_continue_function_boundary")
+{
+    ScopedFastFlag sff{FFlag::LuauIncludeBreakContinueStatements, true};
+
+    check(R"(for i = 1, 10 do
+    local function helper()
+        @1
+    end
+    end)");
+
+    auto ac = autocomplete('1');
+
+    CHECK_EQ(ac.entryMap.count("break"), 0);
+    CHECK_EQ(ac.entryMap.count("continue"), 0);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_exclude_break_continue_in_param")
+{
+    ScopedFastFlag sff{FFlag::LuauIncludeBreakContinueStatements, true};
+
+    check(R"(while @1 do
+        end)");
+
+    auto ac = autocomplete('1');
+
+    CHECK_EQ(ac.entryMap.count("break"), 0);
+    CHECK_EQ(ac.entryMap.count("continue"), 0);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_exclude_break_continue_incomplete_while")
+{
+    ScopedFastFlag sff{FFlag::LuauIncludeBreakContinueStatements, true};
+
+    check("while @1");
+
+    auto ac = autocomplete('1');
+
+    CHECK_EQ(ac.entryMap.count("break"), 0);
+    CHECK_EQ(ac.entryMap.count("continue"), 0);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_exclude_break_continue_incomplete_for")
+{
+    ScopedFastFlag sff{FFlag::LuauIncludeBreakContinueStatements, true};
+
+    check("for @1 in @2 do");
+
+    auto ac = autocomplete('1');
+
+    ac = autocomplete('1');
+    CHECK_EQ(ac.entryMap.count("break"), 0);
+    CHECK_EQ(ac.entryMap.count("continue"), 0);
+
+    ac = autocomplete('2');
+    CHECK_EQ(ac.entryMap.count("break"), 0);
+    CHECK_EQ(ac.entryMap.count("continue"), 0);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_exclude_break_continue_expr_func")
+{
+    ScopedFastFlag sff{FFlag::LuauIncludeBreakContinueStatements, true};
+
+    check(R"(while true do
+        local _ = function ()
+        @1
+        end
+    end)");
+
+    auto ac = autocomplete('1');
+
+    CHECK_EQ(ac.entryMap.count("break"), 0);
+    CHECK_EQ(ac.entryMap.count("continue"), 0);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_include_break_continue_in_repeat")
+{
+    ScopedFastFlag sff{FFlag::LuauIncludeBreakContinueStatements, true};
+
+    check(R"(repeat
+        @1
+    until foo())");
+
+    auto ac = autocomplete('1');
+
+    CHECK(ac.entryMap.count("break") > 0);
+    CHECK(ac.entryMap.count("continue") > 0);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_include_break_continue_in_nests")
+{
+    ScopedFastFlag sff{FFlag::LuauIncludeBreakContinueStatements, true};
+
+    check(R"(while ((function ()
+        while true do
+            @1
+        end
+        end)()) do
+    end)");
+
+    auto ac = autocomplete('1');
+
+    CHECK(ac.entryMap.count("break") > 0);
+    CHECK(ac.entryMap.count("continue") > 0);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_exclude_break_continue_in_incomplete_loop")
+{
+    ScopedFastFlag sff{FFlag::LuauIncludeBreakContinueStatements, true};
+
+    check(R"(while foo() do
+        @1)");
+
+    auto ac = autocomplete('1');
+
+    // We'd like to include break/continue here but the incomplete loop ends immediately.
+    CHECK_EQ(ac.entryMap.count("break"), 0);
+    CHECK_EQ(ac.entryMap.count("continue"), 0);
 }
 
 TEST_SUITE_END();

@@ -13,8 +13,6 @@
 using namespace Luau;
 
 LUAU_FASTFLAG(LuauSolverV2);
-LUAU_FASTFLAG(LuauDoNotAddUpvalueTypesToLocalType)
-LUAU_FASTFLAG(LuauDfgAllowUpdatesInLoops)
 
 struct DataFlowGraphFixture
 {
@@ -56,7 +54,6 @@ struct DataFlowGraphFixture
         CHECK(phi->operands.size() == operandSet.size());
         for (auto o : phi->operands)
             CHECK(operandSet.contains(o.get()));
-
     }
 };
 
@@ -131,8 +128,6 @@ TEST_CASE_FIXTURE(DataFlowGraphFixture, "phi")
 
 TEST_CASE_FIXTURE(DataFlowGraphFixture, "mutate_local_not_owned_by_while")
 {
-    ScopedFastFlag _{FFlag::LuauDfgAllowUpdatesInLoops, true};
-
     dfg(R"(
         local x
 
@@ -172,8 +167,6 @@ TEST_CASE_FIXTURE(DataFlowGraphFixture, "mutate_local_owned_by_while")
 
 TEST_CASE_FIXTURE(DataFlowGraphFixture, "mutate_local_not_owned_by_repeat")
 {
-    ScopedFastFlag _{FFlag::LuauDfgAllowUpdatesInLoops, true};
-
     dfg(R"(
         local x
 
@@ -212,8 +205,6 @@ TEST_CASE_FIXTURE(DataFlowGraphFixture, "mutate_local_owned_by_repeat")
 
 TEST_CASE_FIXTURE(DataFlowGraphFixture, "mutate_local_not_owned_by_for")
 {
-    ScopedFastFlag _{FFlag::LuauDfgAllowUpdatesInLoops, true};
-
     dfg(R"(
         local x
 
@@ -253,8 +244,6 @@ TEST_CASE_FIXTURE(DataFlowGraphFixture, "mutate_local_owned_by_for")
 
 TEST_CASE_FIXTURE(DataFlowGraphFixture, "mutate_local_not_owned_by_for_in")
 {
-    ScopedFastFlag _{FFlag::LuauDfgAllowUpdatesInLoops, true};
-
     dfg(R"(
         local x
 
@@ -294,8 +283,6 @@ TEST_CASE_FIXTURE(DataFlowGraphFixture, "mutate_local_owned_by_for_in")
 
 TEST_CASE_FIXTURE(DataFlowGraphFixture, "mutate_preexisting_property_not_owned_by_while")
 {
-    ScopedFastFlag _{FFlag::LuauDfgAllowUpdatesInLoops, true};
-
     dfg(R"(
         local t = {}
         t.x = 5
@@ -448,8 +435,6 @@ TEST_CASE_FIXTURE(DataFlowGraphFixture, "property_lookup_on_a_phi_node_3")
 
 TEST_CASE_FIXTURE(DataFlowGraphFixture, "function_captures_are_phi_nodes_of_all_versions")
 {
-    ScopedFastFlag _{FFlag::LuauDoNotAddUpvalueTypesToLocalType, true};
-
     dfg(R"(
         local x = 5
 
